@@ -1,0 +1,454 @@
+verbose: True
+allow_errors: False
+
+link:
+  recursive: True
+  HOME: $HOME
+
+ppa:
+  items:
+  - git-core/ppa
+  - mkusb/ppa
+  - graphics-drivers/ppa
+  - otto-kesselgulasch/gimp
+  - ubuntu-mozilla-daily
+  - micahflee/ppa
+  - qbittorrent-team/qbittorrent-stable
+
+pkg:
+  items:
+  - jq
+  - vim
+  - htop
+  - pass
+  - tmux
+  - tree
+  - sshfs
+  - cargo
+  - pwgen
+  - whois
+  - mpg123
+  - autossh
+  - gettext
+  - xdotool
+  - graphviz
+  - shellcheck
+  - pulsemixer
+  - ssh-askpass
+  - openssh-server
+  - npm
+  - zsh
+  - meld
+  - rsync
+  - xclip
+  - dconf-cli
+  - python3-pip
+  - anki
+  - flatpak
+  - gnome-software-plugin-flatpak
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg-agent
+  - software-properties-common
+  - magic-wormhole
+
+apt:
+  items:
+# - diagrams # awesome diagramming (in python) tool
+  - fuse3
+  - ldap-utils
+  - fonts-powerline
+  - libsmbclient-dev
+  - httpie
+  - pianobar
+  - python3-dev
+  - libffi-dev
+  - libicu-dev
+  - libssl-dev
+  - libffi-dev
+  - libdbus-1-dev
+  - libsnappy-dev
+  - build-essential
+  - portaudio19-dev
+  - openvpn
+  - neovim
+  - network-manager-openvpn
+  - network-manager-openvpn-gnome
+  - libcurl4-openssl-dev
+  - librsync-dev
+  - libglib2.0-dev
+  - libgirepository1.0-dev
+  - libcairo2-dev
+  - libjpeg-dev
+  - libgif-dev
+  - python3-cairo-dev
+  - libxml2-dev
+  - libxmlsec1-dev
+  - rlwrap
+  - qbittorrent
+  - libcups2-dev #ref: https://ubuntuforums.org/showthread.php?t=1269926
+  - libkrb5-dev #ref: https://github.com/mongodb-js/kerberos/issues/45
+  - wmctrl #for ./layout script
+
+dnf:
+  items:
+  - the_silver_searcher
+  - gcc
+  - libffi-devel
+  - openssl-devel
+  - python3-devel
+
+pip3:
+  items:
+  - argh
+  - numpy
+  - twine
+  - wheel
+  - addict
+  - aiohttp
+  - ipython
+  - requests
+  - ruamel.yaml
+  - cryptography
+  distutils:
+  - Cython
+  - pexpect
+  - pyasn1-modules
+  - pycairo
+  - pycups
+  - pypng
+  - PyQt5
+  - PyTrie
+  - pyxdg
+  - PyYAML
+  - simplejson
+  - sip
+  - u-msgpack-python
+pipx:
+  items:
+  - doit
+  - mypy
+  - awscli
+  - pipenv
+  - asciinema
+  - pipupgrade
+  - virtualenv
+  - mps-youtube
+  - docker-compose
+
+npm:
+  items:
+  - diff-so-fancy
+  - wt-cli
+  - auth0-deploy-cli
+
+flatpak:
+  items:
+  - org.gnome.GTG
+  - org.gnome.BreakTimer
+  - com.github.hugolabe.Wike
+  - com.github.gi_lom.dialect
+  - com.rafaelmardojai.Blanket
+  - org.gnome.gitlab.somas.Apostrophe
+  - com.github.johnfactotum.QuickLookup
+
+cargo:
+  items:
+  - bat
+  - cargo-expand
+  - cargo-show-asm
+  - cargo-udeps
+  - cargo-update
+  - cargo-upgrades
+  - du-dust
+  - eza
+  - fd-find
+  - fend
+  - grex
+  - himalaya
+  - irust
+  - lfs
+  - macchina
+  - procs
+  - ripgrep
+  - sccache
+  - sd
+  - skim
+  - starship
+  - tail
+  - tealdeer
+  - tokei
+  - tree-sitter-cli
+  - ytop
+  - zoxide
+
+github:
+  scottidler/git:
+    link:
+      bin/clone: ~/bin/clone
+      bin/clone-lite: ~/bin/clone-lite
+      bin/reponame: ~/bin/reponame
+      bin/git-objects: ~/bin/git-objects
+      bin/default-branch: ~/bin/default-branch
+      bin/stale-branches: ~/bin/stale-branches
+      bin/filter-ref: ~/bin/filter-ref
+      shell-functions.sh: ~/.shell-functions.d/clone.sh
+      cfg/clone.cfg: ~/.clone/clone/clone.cfg
+  scottidler/tmp:
+    link:
+      bin/tmp: ~/bin/tmp
+  scottidler/helpful:
+    link:
+      bin/cidr: ~/bin/cidr
+      bin/say: ~/bin/say
+      bin/speedtest: ~/bin/speedtest
+      bin/tab: ~/bin/tab
+      bin/tab1: ~/bin/tab1
+      bin/tab2: ~/bin/tab2
+      bin/tab3: ~/bin/tab3
+      bin/tab4: ~/bin/tab4
+      bin/toggle: ~/bin/toggle
+      bin/prepend: ~/bin/prepend
+      bin/toggle-remote-url: ~/bin/toggle-remote-url
+      shell-functions.sh: ~/.shell-functions.d/helpful.sh
+  scottidler/dock:
+    link:
+      dock: ~/bin/dock
+  scottidler/pimp:
+    link:
+      pimp: ~/bin/pimp
+  scottidler/ls-stat:
+    link:
+      ls-stat: ~/bin/ls-stat
+  scottidler/xpndr:
+    link:
+      xpndr: ~/bin/xpndr
+  scottidler/y2j:
+    link:
+      bin/y2j: ~/bin/y2j
+      bin/j2y: ~/bin/j2y
+  scottidler/repo:
+    link:
+      bin/repo: ~/bin/repo
+  scottidler/nvim:
+    link:
+      ./: ~/.config/nvim
+  mozilla-it/cert-tools:
+    link:
+      findcert: ~/bin/findcert
+      modcert: ~/bin/modcert
+      ssl-compare: ~/bin/ssl-compare
+      ssl-inspect: ~/bin/ssl-inspect
+      ssl-sans: ~/bin/ssl-sans
+      ssl-validity: ~/bin/ssl-validity
+  sahsanu/lectl:
+    link:
+      lectl: ~/bin/lectl
+  esc/git-big-picture:
+    link:
+      git-big-picture: ~/bin/gbp
+  awslabs/awscli-aliases:
+    link:
+      alias: ~/.awscli-aliases
+  powerline/powerline:
+    link:
+      font/10-powerline-symbols.conf: ~/.config/fontconfig/conf.d/10-powerline-symbols.conf
+      font/PowerlineSymbols.otf: ~/.fonts/PowerlineSymbols.otf
+  joel-porquet/zsh-dircolors-solarized:
+    link:
+      zsh-dircolors-solarized.zsh: ~/.zsh/zsh-dircolors-solarized/zsh-dircolors-solarized.zsh
+  robbyrussell/oh-my-zsh:
+    link:
+      ./: ~/.oh-my-zsh
+  awslabs/git-secrets:
+    link:
+      git-secrets: ~/bin/git-secrets
+  tfutils/tfenv:
+    link:
+      bin/terraform: ~/bin/terraform
+      bin/tfenv: ~/bin/tfenv
+
+script:
+  github-cli: |
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+      && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+      && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+      && sudo apt update \
+      && sudo apt install gh -y
+  vim+git: |
+    sudo apt-get install -y vim git
+    sudo update-alternatives --set editor /usr/bin/vim.basic
+  sudoers: |
+    sudo echo "${USER}  ALL=NOPASSWD: ALL" > /etc/sudoers.d/${USER}
+  cheat: |
+    curl https://cht.sh/:cht.sh > ~/bin/cheat
+    chmod +x ~/bin/cheat
+  ngrok: |
+    curl https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip ngrok.zip
+    unzip ngrok.zip
+    mv ngrok/ngrok ~/bin/
+  kubectl: |
+    sudo apt-get update && sudo apt-get install -y apt-transport-https
+    curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+    echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee -a /etc/apt/sources.list.d/kubernetes.list
+    sudo apt-get update
+    sudo apt-get install -y kubectl
+  fluxctl: |
+    latest \
+      "fluxctl_linux_amd64" \
+      "https://api.github.com/repos/fluxcd/flux/releases/latest" \
+      "fluxctl"
+  fzf: |
+    latest \
+      "fzf-.*-linux_amd64.tar.gz" \
+      "https://api.github.com/repos/junegunn/fzf/releases/latest" \
+      "fzf"
+  kubetpl: |
+    latest \
+      "linux-amd64" \
+      "https://api.github.com/repos/shyiko/kubetpl/releases/latest" \
+      "kubetpl"
+  kind: |
+    latest \
+      "kind-linux-amd64" \
+      "https://api.github.com/repos/kubernetes-sigs/kind/releases/latest" \
+      "kind"
+  k9s: |
+    latest \
+      "k9s_Linux_amd64.tar.gz" \
+      "https://api.github.com/repos/derailed/k9s/releases/latest" \
+      "k9s"
+  spotify: |
+    # 1. Add the Spotify repository signing keys to be able to verify downloaded packages
+    sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 931FF8E79F0876134EDDBDCCA87FF9DF48BF1C90
+    # 2. Add the Spotify repository
+    echo deb http://repository.spotify.com stable non-free | sudo tee /etc/apt/sources.list.d/spotify.list
+    # 3. Update list of available packages
+    sudo apt-get update
+    # 4. Install Spotify
+    sudo apt-get install spotify-client
+  rust: |
+    curl https://sh.rustup.rs -sSf | sh
+  virtualbox: |
+    wget -q https://www.virtualbox.org/download/oracle_vbox_2016.asc -O- | sudo apt-key add -
+    wget -q https://www.virtualbox.org/download/oracle_vbox.asc -O- | sudo apt-key add -
+    sudo apt-get update
+    sudo apt-get install virtualbox-6.0
+  docker: |
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+    sudo apt-get update
+    sudo apt-get install -y docker-ce
+  keybase: |
+    # src: https://keybase.io/docs/the_app/install_linux
+    curl --remote-name https://prerelease.keybase.io/keybase_amd64.deb
+    sudo apt install -y ./keybase_amd64.deb
+    rm -rf keybase_amd64.deb
+    run_keybase
+  obsidian: |
+    LATEST="https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest"
+    URL=$(curl -sL "$LATEST" | jq -r ".assets[] | select(.name | test(\"AppImage\")) | .browser_download_url" | grep -v arm64)
+    NAME=$(basename $URL)
+    wget -q $URL
+    chmod +x ./$NAME && mv ./$NAME ~/bin/obsidian
+  exercism: |
+    LATEST="https://api.github.com/repos/exercism/cli/releases/latest"
+    URL=$(curl -sL "$LATEST" | jq -r ".assets[] | select(.name | test(\"$OS-$ARCH\")) | .browser_download_url")
+    wget -q $URL
+    tar xvf $(basename $URL)
+    mv exercism ~/bin/ && rm $(basename $URL)
+  helm: |
+    curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+    chmod 700 get_helm.sh
+    ./get_helm.sh; rm ./get_helm.sh
+  minikube: |
+    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+    sudo install ./minikube-linux-amd64 /usr/local/bin/minikube && rm ./minikube-linux-amd64
+  papertrail: |
+    sudo gem install papertrail
+  nordvpn: |
+    # ref: https://nordvpn.com/download/linux/
+    URL=https://repo.nordvpn.com/deb/nordvpn/debian/pool/main/nordvpn-release_1.0.0_all.deb
+    DEB=$(basename $URL)
+    wget -q $URL
+    sudo apt install ./$DEB && rm ./$DEB
+  riot: |
+    sudo apt install -y lsb-release wget apt-transport-https
+    sudo wget -qO /usr/share/keyrings/riot-im-archive-keyring.gpg https://packages.riot.im/debian/riot-im-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/riot-im-archive-keyring.gpg] https://packages.riot.im/debian/ $(lsb_release -cs) main" |
+      sudo tee /etc/apt/sources.list.d/riot-im.list
+    sudo apt update
+    sudo apt install riot-web
+  vscode: |
+    sudo apt update
+    sudo apt install -y software-properties-common apt-transport-https wget
+    wget -q https://packages.microsoft.com/keys/microsoft.asc -O- | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://packages.microsoft.com/repos/vscode stable main"
+    sudo apt update
+    sudo apt install code
+  pulse-sms: |
+    LATEST=https://api.github.com/repos/maplemedia/pulse-sms-desktop/releases/latest
+    URL=$(curl -sL $LATEST | jq -r '.assets[] | select(.name | contains("deb")) | .browser_download_url')
+    DEB=$(basename $URL)
+    wget -q $URL
+    sudo apt install ./$DEB && rm ./$DEB
+  steam: |
+    URL=http://media.steampowered.com/client/installer/steam.deb
+    DEB=$(basename $URL)
+    wget -q $URL
+    sudo apt install ./$DEB && rm ./$DEB
+  syncthing: |
+    # Add the release PGP keys:
+    curl -s https://syncthing.net/release-key.txt | sudo apt-key add -
+    # Add the "stable" channel to your APT sources:
+    echo "deb https://apt.syncthing.net/ syncthing stable" | sudo tee /etc/apt/sources.list.d/syncthing.list
+    # Update and install syncthing:
+    sudo apt-get update
+    sudo apt-get install syncthing
+  nightly: |
+    APP_DIR=~/.local/share/applications/
+    NIGHTLY_CFG=~/.config/nightly/nightly.desktop
+    desktop-file-validate $NIGHTLY_CFG
+    desktop-file-install --dir=$APP_DIR $NIGHTLY_CFG
+  rtx: |
+    curl https://rtx.pub/rtx-latest-linux-x64 > ~/bin/rtx
+    chmod +x ~/bin/rtx
+  lazygit: |
+    LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+    curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+    tar xf lazygit.tar.gz lazygit
+    sudo install lazygit /usr/local/bin
+  nvim: |
+    NVIM_DIR="$HOME/.nvim"
+    NVIM_BIN="$HOME/bin/nvim"
+    # Fetch the latest release data from GitHub API
+    LATEST_RELEASE=$(curl -sL "https://api.github.com/repos/neovim/neovim/releases/latest")
+    # Extract the tag_name from the release data
+    NVIM_VERSION=$(echo $LATEST_RELEASE | jq -r ".tag_name")
+    # Get the download URL for the nvim-linux64.tar.gz asset
+    LATEST_NVIM=$(echo $LATEST_RELEASE | jq -r ".assets[] | select(.name | test(\"nvim-linux64.tar.gz\")) | .browser_download_url")
+    mkdir -p $NVIM_DIR
+    # Download and extract the nvim tarball
+    curl -L $LATEST_NVIM -o $NVIM_DIR/nvim-linux64.tar.gz
+    tar -xzf $NVIM_DIR/nvim-linux64.tar.gz -C $NVIM_DIR
+    # Rename the extracted directory to the version number
+    NVIM_VERSION_DIR=$NVIM_DIR/$NVIM_VERSION
+    mv $NVIM_DIR/nvim-linux64 $NVIM_VERSION_DIR
+    ln -sfn $NVIM_VERSION_DIR/bin/nvim $NVIM_BIN
+    echo "Neovim version $NVIM_VERSION installed into $NVIM_VERSION_DIR and symlinked to $NVIM_BIN"
+  btop: |
+    latest \
+      "-x86_64-linux-musl.tbz" \
+      "https://api.github.com/repos/aristocratos/btop/releases/latest" \
+      "btop"
+    echo "btop installed successfully."
+  git-tools: |
+    latest \
+      "git-tools-v.*-linux.tar.gz" \
+      "https://api.github.com/repos/scottidler/git-tools/releases/latest" \
+      "git-tools-v.*-linux.tar.gz"
+    tar -xzf git-tools-v.*-linux.tar.gz -C ~/bin/
+    mv ~/bin/shell-functions.sh ~/.shell-functions.d/git-tools.sh
+    rm git-tools-v.*-linux.tar.gz
