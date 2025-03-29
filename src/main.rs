@@ -2,19 +2,27 @@
 
 mod cli;
 mod config;
+mod fuzzy;
 
-use clap::Parser;
-use crate::cli::Cli;
-use crate::config::{
-    filter_by_patterns, recursive_links,
-    Manifest, ManifestSpec, LinkSpec, PpaSpec, PackageSpec, GithubRepoSpec
-};
 use eyre::{Result, eyre};
 use log::info;
 use std::process::Command;
+use clap::Parser;
+
+use crate::cli::Cli;
+use crate::config::{
+    recursive_links,
+    Manifest,
+    ManifestSpec,
+    LinkSpec,
+    PpaSpec,
+    PackageSpec,
+    GithubRepoSpec
+};
+use crate::fuzzy::FuzzyList;
 
 fn main() -> Result<()> {
-    env_logger::init(); // optional logging
+    env_logger::init();
     let args = Cli::parse();
     info!("CLI args: {:?}", args);
 
@@ -33,9 +41,6 @@ fn main() -> Result<()> {
 /// If user typed none of the multi-value flags, we do "complete" (like the Python code).
 /// If user typed ANY of them, we do partial.
 fn is_partial_selection(args: &Cli) -> bool {
-    // If any of these vectors is non-empty, it means the user typed that flag (since 
-    // omit => empty, typed no args => ["*"], typed args => that set).
-    // But note that if it's exactly [] because user omitted the flag, that's different from ["*"].
     !args.link.is_empty()
         || !args.ppa.is_empty()
         || !args.apt.is_empty()
@@ -51,12 +56,13 @@ fn is_partial_selection(args: &Cli) -> bool {
 
 /// Build the final Bash script
 fn generate_bash_script(spec: &ManifestSpec, args: &Cli, include_all: bool) -> Result<String> {
-    // Use 'verbose' / 'errors' so they're not “dead code”
+    // If the manifest is “verbose” or “errors” are set,
+    // we just print a note to avoid “dead code” warnings.
     if spec.verbose {
-        eprintln!("(Verbose mode on, but no special logic here.)");
+        eprintln!("(Verbose mode on, but not used in logic.)");
     }
     if spec.errors {
-        eprintln!("(Errors mode on, but no special logic here.)");
+        eprintln!("(Errors mode on, but not used in logic.)");
     }
 
     let mut bash = String::new();
@@ -88,7 +94,7 @@ fi
         }
     };
 
-    // 5. If “complete” or user specifically asked for link
+    // 5. If “complete” or user specifically asked for `--link`
     if (include_all || !args.link.is_empty()) && spec.link.is_some() {
         bash.push_str(&render_link(spec.link.as_ref().unwrap(), &args.link, args)?);
         bash.push_str("\n");
@@ -117,7 +123,7 @@ fi
             }
         },
         "brew" => {
-            // ...
+            // Possibly handle brew logic here
         },
         _ => {
             // fallback
@@ -169,6 +175,7 @@ fi
     Ok(bash)
 }
 
+/// Attempt to detect package manager
 fn detect_pkgmgr(explicit: &str) -> Result<String> {
     if !explicit.is_empty() {
         return Ok(explicit.to_string());
@@ -192,7 +199,7 @@ fn hash_exists(cmd: &str) -> bool {
     }
 }
 
-/// Merges "pkg" with apt/dnf items
+/// Merge "pkg" with apt/dnf
 fn merged_packages(pkg: Option<&PackageSpec>, distro: Option<&PackageSpec>) -> Vec<String> {
     let mut merged = Vec::new();
     if let Some(p) = pkg {
@@ -208,7 +215,12 @@ fn merged_packages(pkg: Option<&PackageSpec>, distro: Option<&PackageSpec>) -> V
     merged
 }
 
-/// Renders the “link” section
+// ------------------------------------------------------
+// The functions below do fuzzy matching on the final slice
+// using FuzzyList. Here we fix "pkgs.clone()" => "pkgs.to_vec()"
+// whenever pkgs is &[String].
+// ------------------------------------------------------
+
 fn render_link(spec: &LinkSpec, patterns: &[String], args: &Cli) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"links:\"\n");
@@ -217,7 +229,7 @@ fn render_link(spec: &LinkSpec, patterns: &[String], args: &Cli) -> Result<Strin
     let recursive = spec.recursive.unwrap_or(false);
 
     for (srcpath, dstpath) in &spec.items {
-        // If the user’s patterns == ["*"], accept all. Otherwise we filter.
+        // If user typed "*", we accept everything. Otherwise we filter:
         if patterns != &["*".to_string()] {
             if !matches_any_pattern(srcpath, patterns) {
                 continue;
@@ -246,7 +258,7 @@ fn render_link(spec: &LinkSpec, patterns: &[String], args: &Cli) -> Result<Strin
     Ok(bash)
 }
 
-/// Helper for pattern matching
+/// Basic pattern matching
 fn matches_any_pattern(s: &str, patterns: &[String]) -> bool {
     for pat in patterns {
         if pat == "*" {
@@ -261,13 +273,14 @@ fn matches_any_pattern(s: &str, patterns: &[String]) -> bool {
     false
 }
 
-/// Renders the PPA section
+/// ppa
 fn render_ppa(spec: &PpaSpec, patterns: &[String]) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"ppa:\" \n");
 
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        // items is a Vec<String>, so FuzzyList::new(items.clone()) is correct
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -285,9 +298,10 @@ fn render_ppa(spec: &PpaSpec, patterns: &[String]) -> Result<String> {
     Ok(bash)
 }
 
-/// APT
+/// apt
 fn render_apt(pkgs: &[String], patterns: &[String]) -> Result<String> {
-    let matched = filter_by_patterns(pkgs, patterns);
+    // pkgs is &[String] => must do .to_vec() so we have Vec<String> to build FuzzyList.
+    let matched = FuzzyList::new(pkgs.to_vec()).include(patterns).defuzz();
     if matched.is_empty() {
         return Ok(String::new());
     }
@@ -305,9 +319,10 @@ fn render_apt(pkgs: &[String], patterns: &[String]) -> Result<String> {
     Ok(bash)
 }
 
-/// DNF
+/// dnf
 fn render_dnf(pkgs: &[String], patterns: &[String]) -> Result<String> {
-    let matched = filter_by_patterns(pkgs, patterns);
+    // same .to_vec() fix
+    let matched = FuzzyList::new(pkgs.to_vec()).include(patterns).defuzz();
     if matched.is_empty() {
         return Ok(String::new());
     }
@@ -332,7 +347,8 @@ fn render_npm(spec: &PackageSpec, patterns: &[String]) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"npm packages:\" \n");
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        // items is Vec<String> => no .to_vec() needed
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -355,7 +371,7 @@ fn render_pip3(spec: &PackageSpec, patterns: &[String]) -> Result<String> {
     bash.push_str("sudo apt-get install -y python3-dev\n");
     bash.push_str("sudo -H pip3 install --upgrade pip setuptools\n");
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -377,7 +393,7 @@ fn render_pipx(spec: &PackageSpec, patterns: &[String]) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"pipx packages:\" \n");
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -395,7 +411,7 @@ fn render_flatpak(spec: &PackageSpec, patterns: &[String]) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"flatpak packages:\" \n");
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -416,7 +432,7 @@ fn render_cargo(spec: &PackageSpec, patterns: &[String]) -> Result<String> {
     let mut bash = String::new();
     bash.push_str("echo \"cargo crates:\" \n");
     if let Some(ref items) = spec.items {
-        let matched = filter_by_patterns(items, patterns);
+        let matched = FuzzyList::new(items.clone()).include(patterns).defuzz();
         if matched.is_empty() {
             return Ok(bash);
         }
@@ -442,9 +458,9 @@ fn render_github(
     let mut bash = String::new();
     bash.push_str("echo \"github repos:\" \n");
 
-    // gather all keys
+    // gather all keys into a Vec<String>
     let all_keys: Vec<String> = repos.keys().cloned().collect();
-    let matched_keys = filter_by_patterns(&all_keys, patterns);
+    let matched_keys = FuzzyList::new(all_keys).include(patterns).defuzz();
 
     for key in matched_keys {
         if let Some(repo_spec) = repos.get(&key) {
@@ -481,7 +497,7 @@ fn render_github(
     Ok(bash)
 }
 
-/// script
+/// scripts
 fn render_script(
     scripts: &std::collections::HashMap<String, String>,
     patterns: &[String]
@@ -490,7 +506,7 @@ fn render_script(
     bash.push_str("echo \"scripts:\" \n");
 
     let all_keys: Vec<String> = scripts.keys().cloned().collect();
-    let matched = filter_by_patterns(&all_keys, patterns);
+    let matched = FuzzyList::new(all_keys).include(patterns).defuzz();
 
     for k in matched {
         if let Some(script_body) = scripts.get(&k) {
@@ -502,7 +518,7 @@ fn render_script(
     Ok(bash)
 }
 
-/// The “linker()” function from the Python
+/// The “linker()” function from the Python code
 fn include_linker_fn() -> String {
     r#"linker() {
     file=$(realpath "$1")
@@ -524,7 +540,7 @@ fn include_linker_fn() -> String {
 "#.to_string()
 }
 
-/// The “latest()” function from the Python
+/// The “latest()” function from the Python code
 fn include_latest_fn() -> String {
     r#"latest() {
     PATTERN="$1"

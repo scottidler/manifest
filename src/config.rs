@@ -5,31 +5,6 @@ use std::{collections::HashMap, fs};
 use eyre::Result;
 use walkdir::WalkDir;
 
-/// If you need to match against globs, we can use the `glob` crate:
-pub fn filter_by_patterns(items: &[String], patterns: &[String]) -> Vec<String> {
-    if patterns.is_empty() {
-        // If no patterns, return everything
-        return items.to_vec();
-    }
-    let mut results = Vec::new();
-    for pattern in patterns {
-        // If the user typed `*` literally, that's obviously a wildcard match for everything.
-        // But typically you'd interpret it the same as a normal glob.
-        if pattern == "*" {
-            // return everything; no further filtering needed
-            return items.to_vec();
-        }
-        if let Ok(g) = glob::Pattern::new(pattern) {
-            for item in items {
-                if g.matches(item) && !results.contains(item) {
-                    results.push(item.clone());
-                }
-            }
-        }
-    }
-    results
-}
-
 /// If a link spec says `recursive: true`, we walk all files under <cwd>/<srcpath> 
 /// and generate a set of pairs (absolute_source_file, final_dest).
 pub fn recursive_links(srcpath: &str, dstpath: &str, cwd: &str, home: &str) -> Vec<(String, String)> {
