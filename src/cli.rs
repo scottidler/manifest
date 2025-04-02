@@ -1,15 +1,20 @@
 // src/cli.rs
 
-
-use clap::{Parser, ArgAction};
+use clap::{ArgAction, Parser};
 
 /// A single struct using Clap Derive, closely matching the Python argparse approach.
-/// If you type `--link` with no arguments => link=["*"].
-/// If you omit `--link` => link=[].
-/// If you type `--link foo bar` => link=["foo","bar"].
+///
+/// Behavior of each argument:
+/// - If the user runs `--link` with no arguments => `link=["*"]`.
+/// - If the user omits `--link` => `link=[]`.
+/// - If the user types `--link foo bar` => `link=["foo","bar"]`.
+///
+/// And so on for the other sub-commands (`ppa`, `apt`, `dnf`, `npm`, `pip3`, `pipx`,
+/// `flatpak`, `cargo`, `github`, and `script`).
 #[derive(Debug, Parser)]
 #[command(
     name = "manifest",
+    version,
     about = "Generate a Bash script from a YAML manifest describing your config."
 )]
 pub struct Cli {
@@ -49,7 +54,8 @@ pub struct Cli {
     )]
     pub pkgmgr: String,
 
-    /// If the user uses `--link` with zero arguments => ["*"], else specify patterns
+    /// If the user runs `--link` with zero arguments => link=["*"], otherwise
+    /// specify patterns like `--link foo bar`
     #[arg(
         short = 'l',
         long = "link",
@@ -159,4 +165,22 @@ pub struct Cli {
         help = "Specify list of glob patterns to match script items"
     )]
     pub script: Vec<String>,
+}
+
+impl Cli {
+    /// Returns true if any of the sub-commands for partial usage were specified.
+    /// If false, that implies "complete" mode.
+    pub fn any_section_specified(&self) -> bool {
+        !self.link.is_empty()
+            || !self.ppa.is_empty()
+            || !self.apt.is_empty()
+            || !self.dnf.is_empty()
+            || !self.npm.is_empty()
+            || !self.pip3.is_empty()
+            || !self.pipx.is_empty()
+            || !self.flatpak.is_empty()
+            || !self.cargo.is_empty()
+            || !self.github.is_empty()
+            || !self.script.is_empty()
+    }
 }

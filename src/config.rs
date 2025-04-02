@@ -1,97 +1,159 @@
 // src/config.rs
 
-use serde::Deserialize;
-use std::{collections::HashMap, fs};
 use eyre::Result;
-use walkdir::WalkDir;
+use serde::{Deserialize, Serialize};
+use serde_yaml::from_reader;
+use std::collections::HashMap;
+use std::io::Read;
 
-/// If a link spec says `recursive: true`, we walk all files under <cwd>/<srcpath> 
-/// and generate a set of pairs (absolute_source_file, final_dest).
-pub fn recursive_links(srcpath: &str, dstpath: &str, cwd: &str, home: &str) -> Vec<(String, String)> {
-    let mut results = Vec::new();
-    let joined = format!("{}/{}", cwd, srcpath);
-    for entry in WalkDir::new(&joined)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let rel = match entry.path().strip_prefix(&joined) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let source_abs = entry.path().to_string_lossy().to_string();
+/// The top-level structure for the entire manifest file.
+/// This matches the Python's original layout but renamed for clarity.
+/// Everything is optional in the sense that the user may not specify certain sections.
+/// We rely on `#[serde(default)]` for missing fields.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ManifestSpec {
+    #[serde(default)]
+    pub verbose: bool,
+    #[serde(default)]
+    pub errors: bool,
 
-        // If we found <cwd>/<srcpath>/foo/bar.txt,
-        // 'rel' = foo/bar.txt => produce <dstpath>/foo/bar.txt
-        let new_dest = format!("{}/{}", dstpath, rel.display());
-        let final_dest = new_dest.replace("~", home).replace("$HOME", home);
-
-        results.push((source_abs, final_dest));
-    }
-    results
+    #[serde(default)]
+    pub link: LinkSpec,
+    #[serde(default)]
+    pub ppa: PpaSpec,
+    #[serde(default)]
+    pub pkg: PkgSpec,
+    #[serde(default)]
+    pub apt: AptSpec,
+    #[serde(default)]
+    pub dnf: DnfSpec,
+    #[serde(default)]
+    pub npm: NpmSpec,
+    #[serde(default)]
+    pub pip3: Pip3Spec,
+    #[serde(default)]
+    pub pipx: PipxSpec,
+    #[serde(default)]
+    pub flatpak: FlatpakSpec,
+    #[serde(default)]
+    pub cargo: CargoSpec,
+    #[serde(default)]
+    pub github: GithubSpec,
+    #[serde(default)]
+    pub script: ScriptSpec,
 }
 
-// For GitHub, e.g. "owner/repo" -> object that might have "link", "script", etc.
-#[derive(Debug, Deserialize)]
-pub struct GithubRepoSpec {
-    pub link: Option<HashMap<String, String>>,
-    pub script: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
+/// For linking files:
+/// - `recursive`: optional bool
+/// - `items`: a map from src->dst
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct LinkSpec {
-    pub recursive: Option<bool>,
+    #[serde(default)]
+    pub recursive: bool,
+    /// If `recursive=true`, we might interpret these src/dst differently.
+    /// But either way, store them in `items`.
     #[serde(flatten)]
     pub items: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// For adding PPAs: just a list of items
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PpaSpec {
-    pub items: Option<Vec<String>>,
+    #[serde(default)]
+    pub items: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PackageSpec {
-    pub items: Option<Vec<String>>,
+/// For top-level pkg
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PkgSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
 }
 
-/// The top-level YAML structure, mirroring your Python approach
-#[derive(Debug, Deserialize)]
-pub struct ManifestSpec {
-    pub link: Option<LinkSpec>,
-    pub ppa: Option<PpaSpec>,
-    pub pkg: Option<PackageSpec>,
-    pub apt: Option<PackageSpec>,
-    pub dnf: Option<PackageSpec>,
-    pub npm: Option<PackageSpec>,
-    pub pip3: Option<PackageSpec>,
-    pub pipx: Option<PackageSpec>,
-    pub flatpak: Option<PackageSpec>,
-    pub cargo: Option<PackageSpec>,
-
+/// For APT: just a list of items
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AptSpec {
     #[serde(default)]
-    pub github: HashMap<String, GithubRepoSpec>,
-
-    #[serde(default)]
-    pub script: HashMap<String, String>,
-
-    #[serde(default)]
-    pub verbose: bool,
-
-    #[serde(default)]
-    pub errors: bool,
+    pub items: Vec<String>,
 }
 
-/// A simple wrapper so we can do `Manifest::load_from_file(...)`
-#[derive(Debug)]
-pub struct Manifest {
-    pub spec: ManifestSpec,
+/// For DNF
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DnfSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
 }
 
-impl Manifest {
-    pub fn load_from_file(path: &str) -> Result<Self> {
-        let contents = fs::read_to_string(path)?;
-        let spec: ManifestSpec = serde_yaml::from_str(&contents)?;
-        Ok(Self { spec })
-    }
+/// For NPM
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct NpmSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// For pip3: we have an items vec plus "distutils" folded in. We'll unify them at runtime.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Pip3Spec {
+    #[serde(default)]
+    pub items: Vec<String>,
+    #[serde(default)]
+    pub distutils: Vec<String>,
+}
+
+/// For pipx
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PipxSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// For flatpak
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct FlatpakSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// For cargo
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CargoSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// For script, we store "items" as a HashMap of scriptName->scriptBody
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ScriptSpec {
+    #[serde(default)]
+    pub items: HashMap<String, String>,
+}
+
+/// For GitHub, we keep a field "repopath" plus a HashMap of repoName->RepoSpec
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GithubSpec {
+    #[serde(default = "default_repopath")]
+    pub repopath: String,
+    /// The user wants "items" for everything, so let's rename "repos" -> "items":
+    #[serde(default)]
+    #[serde(flatten)]
+    pub items: HashMap<String, RepoSpec>,
+}
+
+fn default_repopath() -> String {
+    "repos".to_string()
+}
+
+/// Each named repository is a struct that can have link + script
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RepoSpec {
+    #[serde(default)]
+    pub link: LinkSpec,
+    #[serde(default)]
+    pub script: ScriptSpec,
+}
+
+/// Helper to load the Manifest from a reader
+pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
+    let parsed: ManifestSpec = from_reader(r)?;
+    Ok(parsed)
 }
