@@ -122,12 +122,18 @@ EOM
 }
 
 /// Helper: renders a continuation-style snippet.
-/// Produces:
-/// {header}
+/// Produces a header followed by a command line where the items are joined
+/// with a " \\\n    " separator, which results in a shell command that spans
+/// multiple indented lines. For example:
 ///
-/// {block} {items}
+/// echo "apts:"
+///
+/// sudo apt install -y item1 \
+///     item2 \
+///     item3
 fn render_continue(header: &str, block: &str, items: &[String]) -> String {
-    let items = items.join(" ");
+    // Join items with a backslash and a newline for readability.
+    let items = items.join(" \\\n    ");
     format!(
 r#"{header}
 

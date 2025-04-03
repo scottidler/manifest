@@ -9,24 +9,65 @@ use crate::cli::Cli;
 use crate::config::*;
 use crate::manifest::{ManifestType, build_script};
 use clap::Parser;
-use eyre::Result;
+use eyre::{eyre, Result};
+use log::*;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
+use chrono::Local;  // For timestamp in log separator
+
+/// Checks whether the given program is available on the system by invoking "command -v".
+fn check_hash(program: &str) -> bool {
+    debug!("check_hash: checking for program {}", program);
+    // Using "command -v" to check for the existence of a command
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {}", program))
+        .output();
+    match output {
+        Ok(o) => {
+            let found = !o.stdout.is_empty();
+            debug!("check_hash: program {} found = {}", program, found);
+            found
+        }
+        Err(e) => {
+            warn!("check_hash: error checking {}: {}", program, e);
+            false
+        }
+    }
+}
+
+/// Determines the package manager in use by querying the system.
+fn get_pkgmgr() -> Result<String> {
+    if check_hash("dpkg") {
+        debug!("get_pkgmgr: detected dpkg");
+        Ok("deb".to_string())
+    } else if check_hash("rpm") {
+        debug!("get_pkgmgr: detected rpm");
+        Ok("rpm".to_string())
+    } else if check_hash("brew") {
+        debug!("get_pkgmgr: detected brew");
+        Ok("brew".to_string())
+    } else {
+        Err(eyre!("unknown pkgmgr!"))
+    }
+}
 
 // Returns a sorted clone of a vector of Strings.
 fn sorted_vec(vec: &[String]) -> Vec<String> {
+    debug!("sorted_vec: received input vector with {} items", vec.len());
     let mut v = vec.to_vec();
     v.sort();
+    debug!("sorted_vec: sorted vector = {:?}", v);
     v
 }
 
 // Returns a new HashMap sorted by key.
-// Note: The returned HashMap does not guarantee iteration order,
-// so for rendering sorted output you may want to convert the keys to a Vec.
 fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
+    debug!("sorted_map: received map with {} entries", map.len());
     let mut keys: Vec<_> = map.keys().collect();
     keys.sort();
     let mut sorted = HashMap::new();
@@ -35,27 +76,128 @@ fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
             sorted.insert(key.clone(), val.clone());
         }
     }
+    debug!("sorted_map: sorted map keys = {:?}", sorted.keys().collect::<Vec<_>>());
     sorted
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    env_logger::init();
+/// Converts the LinkSpec into a Vec<String> where each string is a line of "src dst"
+fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
+    debug!("linkspec_to_vec: starting with spec = {:?}", spec);
+    let mut lines = Vec::new();
+    let cwd = Path::new(&cli.cwd);
+    debug!("linkspec_to_vec: current working directory = {:?}", cwd);
 
-    // parse the YAML
+    let home = if cli.home.is_empty() {
+        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+    } else {
+        cli.home.clone()
+    };
+    debug!("linkspec_to_vec: resolved HOME = {}", home);
+
+    if spec.recursive {
+        debug!("linkspec_to_vec: recursive mode enabled");
+        for (src, dst) in &spec.items {
+            let src_dir = cwd.join(src);
+            debug!("linkspec_to_vec: processing src = {:?} -> dst = {:?}", src_dir, dst);
+            if src_dir.exists() {
+                for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+                        let dst_path: PathBuf = Path::new(dst).join(rel);
+                        let mut final_dst = dst_path.to_string_lossy().to_string();
+                        final_dst = final_dst.replace("$HOME", &home);
+                        let source_str = path.to_string_lossy().to_string();
+                        lines.push(format!("{} {}", source_str, final_dst));
+                    }
+                }
+            } else {
+                warn!("linkspec_to_vec: source directory {:?} does not exist", src_dir);
+            }
+        }
+    } else {
+        debug!("linkspec_to_vec: non-recursive mode");
+        for (src, dst) in &spec.items {
+            let source_path = cwd.join(src);
+            let source_str = source_path.to_string_lossy().to_string();
+            let dst_path = Path::new(dst).to_path_buf();
+            let mut final_dst = dst_path.to_string_lossy().to_string();
+            final_dst = final_dst.replace("$HOME", &home);
+            lines.push(format!("{} {}", source_str, final_dst));
+        }
+    }
+    debug!("linkspec_to_vec: generated {} lines", lines.len());
+    Ok(lines)
+}
+
+fn merge_pkg_apt(spec: &ManifestSpec) -> Vec<String> {
+    debug!("merge_pkg_apt: merging pkg.items (len={}) and apt.items (len={})", spec.pkg.items.len(), spec.apt.items.len());
+    let mut merged = Vec::new();
+    merged.extend_from_slice(&spec.pkg.items);
+    merged.extend_from_slice(&spec.apt.items);
+    debug!("merge_pkg_apt: merged length = {}", merged.len());
+    merged
+}
+
+fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
+    debug!("merge_pkg_dnf: merging pkg.items (len={}) and dnf.items (len={})", spec.pkg.items.len(), spec.dnf.items.len());
+    let mut merged = Vec::new();
+    merged.extend_from_slice(&spec.pkg.items);
+    merged.extend_from_slice(&spec.dnf.items);
+    debug!("merge_pkg_dnf: merged length = {}", merged.len());
+    merged
+}
+
+fn main() -> Result<()> {
+    // Initialize logging to a file "manifest.log" in the user's home directory.
+    use env_logger::Builder;
+    use log::LevelFilter;
+
+    let mut log_builder = Builder::new();
+    log_builder.filter_level(LevelFilter::Info);
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        log_builder.parse_filters(&rust_log);
+    }
+    let log_file_path = std::env::var("HOME")
+        .map(|home| format!("{}/manifest.log", home))
+        .unwrap_or_else(|_| "manifest.log".to_string());
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&log_file_path)
+        .expect("Unable to open log file");
+    writeln!( &file, "\n================ New run at {} ================", Local::now())
+        .expect("Unable to write log separator");
+    log_builder.target(env_logger::Target::Pipe(Box::new(file)));
+    log_builder.init();
+
+    info!("Starting manifest generation");
+
+    let cli = Cli::parse();
+    debug!("Parsed CLI arguments: {:?}", cli);
+
+    // Parse the YAML config.
     let file = File::open(&cli.config)?;
+    debug!("Opened config file: {}", cli.config);
     let mut reader = BufReader::new(file);
-    let manifest_spec: ManifestSpec = load_manifest_spec(&mut reader)?;
+    let manifest_spec: ManifestSpec = config::load_manifest_spec(&mut reader)?;
+    debug!("Loaded manifest spec: {:?}", manifest_spec);
 
     let complete = !cli.any_section_specified();
+    debug!("Complete mode = {}", complete);
 
-    // We'll gather “sections” in a plain Vec<ManifestType>
+    // Determine the package manager by querying the system.
+    let pkgmgr = get_pkgmgr()?;
+    debug!("Determined pkgmgr: {}", pkgmgr);
+
+    // Gather sections into a plain Vec<ManifestType>
     let mut sections: Vec<ManifestType> = Vec::new();
 
     // 1) Link => Heredoc style => store as Vec<String>
     if complete || !cli.link.is_empty() {
         if !manifest_spec.link.items.is_empty() || manifest_spec.link.recursive {
             let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
+            debug!("Adding Link section with {} lines", lines.len());
             sections.push(ManifestType::Link(sorted_vec(&lines)));
         }
     }
@@ -64,16 +206,17 @@ fn main() -> Result<()> {
     if complete || !cli.ppa.is_empty() {
         let items = &manifest_spec.ppa.items;
         if !items.is_empty() {
+            debug!("Adding Ppa section with {} items", items.len());
             sections.push(ManifestType::Ppa(sorted_vec(&items.clone())));
         }
     }
 
-    // Combine `pkg.items` + `apt.items` or `dnf.items`
-    let pkgmgr = cli.pkgmgr.to_lowercase();
+    // Combine pkg.items with apt.items or dnf.items based on pkgmgr.
     if pkgmgr == "deb" {
         if complete || !cli.apt.is_empty() {
             let merged = merge_pkg_apt(&manifest_spec);
             if !merged.is_empty() {
+                debug!("Adding Apt section with {} merged items", merged.len());
                 sections.push(ManifestType::Apt(sorted_vec(&merged)));
             }
         }
@@ -81,6 +224,7 @@ fn main() -> Result<()> {
         if complete || !cli.dnf.is_empty() {
             let merged = merge_pkg_dnf(&manifest_spec);
             if !merged.is_empty() {
+                debug!("Adding Dnf section with {} merged items", merged.len());
                 sections.push(ManifestType::Dnf(sorted_vec(&merged)));
             }
         }
@@ -89,6 +233,7 @@ fn main() -> Result<()> {
     // 3) NPM => Continue style => store as Vec<String>
     if complete || !cli.npm.is_empty() {
         if !manifest_spec.npm.items.is_empty() {
+            debug!("Adding Npm section with {} items", manifest_spec.npm.items.len());
             sections.push(ManifestType::Npm(sorted_vec(&manifest_spec.npm.items.clone())));
         }
     }
@@ -98,6 +243,7 @@ fn main() -> Result<()> {
         let mut combined = manifest_spec.pip3.items.clone();
         combined.extend_from_slice(&manifest_spec.pip3.distutils);
         if !combined.is_empty() {
+            debug!("Adding Pip3 section with {} combined items", combined.len());
             sections.push(ManifestType::Pip3(sorted_vec(&combined)));
         }
     }
@@ -105,6 +251,7 @@ fn main() -> Result<()> {
     // 5) Pipx => Heredoc style => store as Vec<String>
     if complete || !cli.pipx.is_empty() {
         if !manifest_spec.pipx.items.is_empty() {
+            debug!("Adding Pipx section with {} items", manifest_spec.pipx.items.len());
             sections.push(ManifestType::Pipx(sorted_vec(&manifest_spec.pipx.items.clone())));
         }
     }
@@ -112,6 +259,7 @@ fn main() -> Result<()> {
     // 6) Flatpak => Continue style => store as Vec<String>
     if complete || !cli.flatpak.is_empty() {
         if !manifest_spec.flatpak.items.is_empty() {
+            debug!("Adding Flatpak section with {} items", manifest_spec.flatpak.items.len());
             sections.push(ManifestType::Flatpak(sorted_vec(&manifest_spec.flatpak.items.clone())));
         }
     }
@@ -119,6 +267,7 @@ fn main() -> Result<()> {
     // 7) Cargo => Continue style => store as Vec<String>
     if complete || !cli.cargo.is_empty() {
         if !manifest_spec.cargo.items.is_empty() {
+            debug!("Adding Cargo section with {} items", manifest_spec.cargo.items.len());
             sections.push(ManifestType::Cargo(sorted_vec(&manifest_spec.cargo.items.clone())));
         }
     }
@@ -130,6 +279,7 @@ fn main() -> Result<()> {
             for (repo_name, _repo_spec) in &manifest_spec.github.items {
                 map.insert(repo_name.clone(), "some detail".to_string());
             }
+            debug!("Adding Github section with {} repos", map.len());
             sections.push(ManifestType::Github(sorted_map(&map)));
         }
     }
@@ -137,86 +287,16 @@ fn main() -> Result<()> {
     // 9) Script => custom => store the script items as a HashMap<String, String>
     if complete || !cli.script.is_empty() {
         if !manifest_spec.script.items.is_empty() {
+            debug!("Adding Script section with {} items", manifest_spec.script.items.len());
             sections.push(ManifestType::Script(sorted_map(&manifest_spec.script.items.clone())));
         }
     }
 
-    // Render final output
+    debug!("Total sections collected: {}", sections.len());
     let output = build_script(&sections);
+    debug!("Generated output script:\n{}", output);
     println!("{}", output);
 
+    info!("Manifest generation completed");
     Ok(())
-}
-
-/// Converts the LinkSpec into a Vec<String> where each string is a line of "src dst"
-/// When recursive is enabled, it traverses the source directory using WalkDir and computes
-/// the destination path by appending the file's relative path to the destination prefix.
-/// It also performs interpolation of "$HOME" in the destination path.
-fn linkspec_to_vec(spec: &LinkSpec, cli: &Cli) -> Result<Vec<String>> {
-    let mut lines = Vec::new();
-    let cwd = Path::new(&cli.cwd);
-
-    let home = if cli.home.is_empty() {
-        std::env::var("HOME")?
-    } else {
-        cli.home.clone()
-    };
-
-    if spec.recursive {
-        for (src, dst) in &spec.items {
-            let src_dir = cwd.join(src);
-            if src_dir.exists() {
-                // By default, WalkDir returns the exact on-disk path, including symlinks.
-                // We do NOT call `canonicalize`, so we won't resolve symlinks to real paths.
-                for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if path.is_file() {
-                        // Compute the relative path from src_dir to this file.
-                        let rel = path
-                            .strip_prefix(&src_dir)
-                            .unwrap_or(path);
-
-                        // Build the destination path by joining dst with that relative path.
-                        let dst_path: PathBuf = Path::new(dst).join(rel);
-
-                        // Replace $HOME in the destination path if needed.
-                        let mut final_dst = dst_path.to_string_lossy().to_string();
-                        final_dst = final_dst.replace("$HOME", &home);
-
-                        // Convert the source path to a string as-is (preserving symlinks).
-                        let source_str = path.to_string_lossy().to_string();
-
-                        lines.push(format!("{} {}", source_str, final_dst));
-                    }
-                }
-            }
-        }
-    } else {
-        for (src, dst) in &spec.items {
-            // If you want to keep symlinks in `src` as typed in your YAML, do NOT canonicalize:
-            let source_path = cwd.join(src);
-            let source_str = source_path.to_string_lossy().to_string();
-
-            let dst_path = Path::new(dst).to_path_buf();
-            let mut final_dst = dst_path.to_string_lossy().to_string();
-            final_dst = final_dst.replace("$HOME", &home);
-
-            lines.push(format!("{} {}", source_str, final_dst));
-        }
-    }
-    Ok(lines)
-}
-
-fn merge_pkg_apt(spec: &ManifestSpec) -> Vec<String> {
-    let mut merged = Vec::new();
-    merged.extend_from_slice(&spec.pkg.items);
-    merged.extend_from_slice(&spec.apt.items);
-    merged
-}
-
-fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
-    let mut merged = Vec::new();
-    merged.extend_from_slice(&spec.pkg.items);
-    merged.extend_from_slice(&spec.dnf.items);
-    merged
 }
