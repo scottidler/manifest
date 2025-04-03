@@ -2,19 +2,19 @@
 
 mod config;
 mod manifest;
-mod cli; // your existing CLI code
-mod fuzzy; // if you have fuzzy code
+mod cli;    // your existing CLI code
+mod fuzzy;  // generic fuzzy matching functions
 
 use crate::cli::Cli;
 use crate::config::*;
 use crate::manifest::{ManifestType, build_script};
 use clap::Parser;
-use eyre::{eyre, Result};
+use eyre::Result;
 use log::*;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use walkdir::WalkDir;
 use chrono::Local;  // For timestamp in log separator
@@ -22,7 +22,6 @@ use chrono::Local;  // For timestamp in log separator
 /// Checks whether the given program is available on the system by invoking "command -v".
 fn check_hash(program: &str) -> bool {
     debug!("check_hash: checking for program {}", program);
-    // Using "command -v" to check for the existence of a command
     let output = Command::new("sh")
         .arg("-c")
         .arg(format!("command -v {}", program))
@@ -52,11 +51,11 @@ fn get_pkgmgr() -> Result<String> {
         debug!("get_pkgmgr: detected brew");
         Ok("brew".to_string())
     } else {
-        Err(eyre!("unknown pkgmgr!"))
+        Err(eyre::eyre!("unknown pkgmgr!"))
     }
 }
 
-// Returns a sorted clone of a vector of Strings.
+/// Returns a sorted clone of a vector of Strings.
 fn sorted_vec(vec: &[String]) -> Vec<String> {
     debug!("sorted_vec: received input vector with {} items", vec.len());
     let mut v = vec.to_vec();
@@ -65,7 +64,7 @@ fn sorted_vec(vec: &[String]) -> Vec<String> {
     v
 }
 
-// Returns a new HashMap sorted by key.
+/// Returns a new HashMap sorted by key.
 fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
     debug!("sorted_map: received map with {} entries", map.len());
     let mut keys: Vec<_> = map.keys().collect();
@@ -104,7 +103,7 @@ fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
                     let path = entry.path();
                     if path.is_file() {
                         let rel = path.strip_prefix(&src_dir).unwrap_or(path);
-                        let dst_path: PathBuf = Path::new(dst).join(rel);
+                        let dst_path = Path::new(dst).join(rel);
                         let mut final_dst = dst_path.to_string_lossy().to_string();
                         final_dst = final_dst.replace("$HOME", &home);
                         let source_str = path.to_string_lossy().to_string();
@@ -131,7 +130,11 @@ fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
 }
 
 fn merge_pkg_apt(spec: &ManifestSpec) -> Vec<String> {
-    debug!("merge_pkg_apt: merging pkg.items (len={}) and apt.items (len={})", spec.pkg.items.len(), spec.apt.items.len());
+    debug!(
+        "merge_pkg_apt: merging pkg.items (len={}) and apt.items (len={})",
+        spec.pkg.items.len(),
+        spec.apt.items.len()
+    );
     let mut merged = Vec::new();
     merged.extend_from_slice(&spec.pkg.items);
     merged.extend_from_slice(&spec.apt.items);
@@ -140,7 +143,11 @@ fn merge_pkg_apt(spec: &ManifestSpec) -> Vec<String> {
 }
 
 fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
-    debug!("merge_pkg_dnf: merging pkg.items (len={}) and dnf.items (len={})", spec.pkg.items.len(), spec.dnf.items.len());
+    debug!(
+        "merge_pkg_dnf: merging pkg.items (len={}) and dnf.items (len={})",
+        spec.pkg.items.len(),
+        spec.dnf.items.len()
+    );
     let mut merged = Vec::new();
     merged.extend_from_slice(&spec.pkg.items);
     merged.extend_from_slice(&spec.dnf.items);
@@ -149,7 +156,6 @@ fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
 }
 
 fn main() -> Result<()> {
-    // Initialize logging to a file "manifest.log" in the user's home directory.
     use env_logger::Builder;
     use log::LevelFilter;
 
@@ -166,8 +172,12 @@ fn main() -> Result<()> {
         .create(true)
         .open(&log_file_path)
         .expect("Unable to open log file");
-    writeln!( &file, "\n================ New run at {} ================", Local::now())
-        .expect("Unable to write log separator");
+    writeln!(
+        &file,
+        "\n================ New run at {} ================",
+        Local::now()
+    )
+    .expect("Unable to write log separator");
     log_builder.target(env_logger::Target::Pipe(Box::new(file)));
     log_builder.init();
 
@@ -186,14 +196,12 @@ fn main() -> Result<()> {
     let complete = !cli.any_section_specified();
     debug!("Complete mode = {}", complete);
 
-    // Determine the package manager by querying the system.
     let pkgmgr = get_pkgmgr()?;
     debug!("Determined pkgmgr: {}", pkgmgr);
 
-    // Gather sections into a plain Vec<ManifestType>
     let mut sections: Vec<ManifestType> = Vec::new();
 
-    // 1) Link => Heredoc style => store as Vec<String>
+    // 1) Link section.
     if complete || !cli.link.is_empty() {
         if !manifest_spec.link.items.is_empty() || manifest_spec.link.recursive {
             let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
@@ -202,7 +210,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 2) Ppa => Heredoc style => store as Vec<String>
+    // 2) PPA section.
     if complete || !cli.ppa.is_empty() {
         let items = &manifest_spec.ppa.items;
         if !items.is_empty() {
@@ -211,7 +219,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Combine pkg.items with apt.items or dnf.items based on pkgmgr.
+    // 3) Apt/Dnf section.
     if pkgmgr == "deb" {
         if complete || !cli.apt.is_empty() {
             let merged = merge_pkg_apt(&manifest_spec);
@@ -230,7 +238,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 3) NPM => Continue style => store as Vec<String>
+    // 4) NPM section.
     if complete || !cli.npm.is_empty() {
         if !manifest_spec.npm.items.is_empty() {
             debug!("Adding Npm section with {} items", manifest_spec.npm.items.len());
@@ -238,7 +246,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 4) Pip3 => Continue style => unify items+distutils
+    // 5) Pip3 section.
     if complete || !cli.pip3.is_empty() {
         let mut combined = manifest_spec.pip3.items.clone();
         combined.extend_from_slice(&manifest_spec.pip3.distutils);
@@ -248,7 +256,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 5) Pipx => Heredoc style => store as Vec<String>
+    // 6) Pipx section.
     if complete || !cli.pipx.is_empty() {
         if !manifest_spec.pipx.items.is_empty() {
             debug!("Adding Pipx section with {} items", manifest_spec.pipx.items.len());
@@ -256,7 +264,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 6) Flatpak => Continue style => store as Vec<String>
+    // 7) Flatpak section.
     if complete || !cli.flatpak.is_empty() {
         if !manifest_spec.flatpak.items.is_empty() {
             debug!("Adding Flatpak section with {} items", manifest_spec.flatpak.items.len());
@@ -264,7 +272,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // 7) Cargo => Continue style => store as Vec<String>
+    // 8) Cargo section.
     if complete || !cli.cargo.is_empty() {
         if !manifest_spec.cargo.items.is_empty() {
             debug!("Adding Cargo section with {} items", manifest_spec.cargo.items.len());
@@ -272,19 +280,20 @@ fn main() -> Result<()> {
         }
     }
 
-    // 8) Github => custom => store as a HashMap<String, String>
+    // 9) Github section.
+    // Wrap the repos in a FuzzyDict, filter with include(), and unwrap with defuzz().
     if complete || !cli.github.is_empty() {
-        if !manifest_spec.github.items.is_empty() {
-            let mut map = HashMap::new();
-            for (repo_name, _repo_spec) in &manifest_spec.github.items {
-                map.insert(repo_name.clone(), "some detail".to_string());
-            }
-            debug!("Adding Github section with {} repos", map.len());
-            sections.push(ManifestType::Github(sorted_map(&map)));
+        let matched: HashMap<String, RepoSpec> =
+            fuzzy::FuzzyDict::new(manifest_spec.github.items.clone())
+                .include(&cli.github, None)
+                .defuzz();
+        if !matched.is_empty() {
+            debug!("Adding Github section with {} repos", matched.len());
+            sections.push(ManifestType::Github(matched));
         }
     }
 
-    // 9) Script => custom => store the script items as a HashMap<String, String>
+    // 10) Script section.
     if complete || !cli.script.is_empty() {
         if !manifest_spec.script.items.is_empty() {
             debug!("Adding Script section with {} items", manifest_spec.script.items.len());

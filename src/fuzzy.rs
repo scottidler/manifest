@@ -3,229 +3,175 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use serde_yaml::Value;
-use eyre::{Result, eyre};
+use regex::Regex;
 use glob::Pattern;
+//use eyre::{Result, eyre};
 
-/// A manual error type that we can wrap with `eyre!` as needed.
+/// An error type for fuzzy matching issues.
 #[derive(Debug)]
 pub struct FuzzyError(pub String);
 
 impl std::fmt::Display for FuzzyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid fuzzy type: {}", self.0)
+        write!(f, "FuzzyError: {}", self.0)
     }
 }
 
 impl std::error::Error for FuzzyError {}
 
-/// The “fuzzy” object for a list of strings
+/// The various matching strategies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchType {
+    Exact,
+    IgnoreCase,
+    Prefix,
+    Suffix,
+    Contains,
+    Glob,
+    Regex,
+}
+
+/// The default match types (in order) to try when matching a key.
+pub const DEFAULT_MATCH_TYPES: [MatchType; 4] = [
+    MatchType::Exact,
+    MatchType::IgnoreCase,
+    MatchType::Prefix,
+    MatchType::Contains,
+];
+
+/// Given an item string and a pattern, return true if the item matches the pattern using the specified match type.
+fn match_str(item: &str, pattern: &str, mt: MatchType) -> bool {
+    match mt {
+        MatchType::Exact => item == pattern,
+        MatchType::IgnoreCase => item.eq_ignore_ascii_case(pattern),
+        MatchType::Prefix => item.starts_with(pattern),
+        MatchType::Suffix => item.ends_with(pattern),
+        MatchType::Contains => item.contains(pattern),
+        MatchType::Glob => {
+            if let Ok(p) = Pattern::new(pattern) {
+                p.matches(item)
+            } else {
+                false
+            }
+        }
+        MatchType::Regex => {
+            if let Ok(re) = Regex::new(pattern) {
+                re.is_match(item)
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Returns true if the given key matches any of the provided patterns using one or more match types.
+fn key_matches(key: &str, patterns: &[String], match_types: &[MatchType]) -> bool {
+    for pattern in patterns {
+        for &mt in match_types {
+            if match_str(key, pattern, mt) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A fuzzy list built from a list of strings.
 #[derive(Debug, Clone)]
 pub struct FuzzyList {
     items: Vec<String>,
 }
 
 impl FuzzyList {
-    /// Create a new FuzzyList from a `Vec<String>`
+    /// Create a new FuzzyList.
     pub fn new(items: Vec<String>) -> Self {
         Self { items }
     }
 
-    /// Keep only items that match ANY of the patterns
+    /// Return a new FuzzyList containing only those items whose string value matches at least one pattern.
     pub fn include(&self, patterns: &[String]) -> Self {
         let filtered = self
             .items
             .iter()
-            .filter(|item| matches_any(item, patterns))
+            .filter(|item| key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
             .cloned()
             .collect();
         FuzzyList { items: filtered }
     }
 
-    /// Keep only items that *do not* match ANY of the patterns (exclude them).
+    /// Return a new FuzzyList excluding items that match any of the given patterns.
     pub fn exclude(&self, patterns: &[String]) -> Self {
         let filtered = self
             .items
             .iter()
-            .filter(|item| !matches_any(item, patterns))
+            .filter(|item| !key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
             .cloned()
             .collect();
         FuzzyList { items: filtered }
     }
 
-    /// Return the final underlying vector of strings
+    /// Unwrap the underlying Vec.
     pub fn defuzz(self) -> Vec<String> {
         self.items
     }
 
-    /// Borrowing version if you prefer (returns a slice).
-    /// But typically `defuzz()` is enough.
+    /// Borrow a slice of the underlying Vec.
     pub fn as_slice(&self) -> &[String] {
         &self.items
     }
 }
 
-/// The “fuzzy” object for a dictionary with string keys
+/// A generic fuzzy dictionary. This replaces the previous YAML-specific FuzzyDict.
+/// It holds a HashMap with String keys and any type T as values. Its include/exclude methods
+/// filter entries based on fuzzy matching of the keys.
 #[derive(Debug, Clone)]
-pub struct FuzzyDict {
-    items: HashMap<String, Value>,
+pub struct FuzzyDict<T> {
+    pub items: HashMap<String, T>,
 }
 
-impl FuzzyDict {
-    /// Create a new `FuzzyDict` from a `HashMap<String, Value>`
-    pub fn new(items: HashMap<String, Value>) -> Self {
+impl<T: Clone> FuzzyDict<T> {
+    /// Create a new FuzzyDict from a HashMap.
+    pub fn new(items: HashMap<String, T>) -> Self {
         Self { items }
     }
 
-    /// Keep only entries whose keys match ANY of the patterns
-    pub fn include(&self, patterns: &[String]) -> Self {
-        let filtered = self
-            .items
-            .iter()
-            .filter(|(key, _)| matches_any(key, patterns))
-            .map(|(k,v)| (k.clone(), v.clone()))
+    /// Include only entries whose keys match ANY of the given patterns.
+    /// If any pattern is "*" then all keys are included.
+    /// Optionally override the match types; otherwise the default match types are used.
+    pub fn include(&self, patterns: &[String], match_types: Option<&[MatchType]>) -> Self {
+        let mts = match_types.unwrap_or(&DEFAULT_MATCH_TYPES);
+        let filtered = self.items.iter()
+            .filter(|(key, _)| {
+                if patterns.iter().any(|p| p == "*") {
+                    true
+                } else {
+                    key_matches(key, patterns, mts)
+                }
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        FuzzyDict { items: filtered }
+        Self { items: filtered }
     }
 
-    /// Keep only entries whose keys *do not* match ANY of the patterns
-    pub fn exclude(&self, patterns: &[String]) -> Self {
-        let filtered = self
-            .items
-            .iter()
-            .filter(|(key, _)| !matches_any(key, patterns))
-            .map(|(k,v)| (k.clone(), v.clone()))
+    /// Exclude entries whose keys match ANY of the given patterns.
+    /// If any pattern is "*" then all keys are excluded.
+    pub fn exclude(&self, patterns: &[String], match_types: Option<&[MatchType]>) -> Self {
+        let mts = match_types.unwrap_or(&DEFAULT_MATCH_TYPES);
+        let filtered = self.items.iter()
+            .filter(|(key, _)| {
+                if patterns.iter().any(|p| p == "*") {
+                    false
+                } else {
+                    !key_matches(key, patterns, mts)
+                }
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        FuzzyDict { items: filtered }
+        Self { items: filtered }
     }
 
-    /// Return the final underlying `HashMap<String, Value>`
-    pub fn defuzz(self) -> HashMap<String, Value> {
+    /// Consume self and return the underlying HashMap.
+    pub fn defuzz(self) -> HashMap<String, T> {
         self.items
     }
-}
-
-/// An enum that can hold either a `FuzzyList` or `FuzzyDict`.
-#[derive(Debug, Clone)]
-pub enum FuzzyValue {
-    List(FuzzyList),
-    Dict(FuzzyDict),
-}
-
-impl FuzzyValue {
-    /// If this is a list, call `.include(...)`. If it’s a dict, call `.include(...)` on the keys.
-    /// If you want separate `include_list()` vs `include_dict()`, do so.
-    pub fn include(self, patterns: &[String]) -> Self {
-        match self {
-            FuzzyValue::List(fl) => FuzzyValue::List(fl.include(patterns)),
-            FuzzyValue::Dict(fd) => FuzzyValue::Dict(fd.include(patterns)),
-        }
-    }
-
-    /// Exclude matching items or keys
-    pub fn exclude(self, patterns: &[String]) -> Self {
-        match self {
-            FuzzyValue::List(fl) => FuzzyValue::List(fl.exclude(patterns)),
-            FuzzyValue::Dict(fd) => FuzzyValue::Dict(fd.exclude(patterns)),
-        }
-    }
-
-    /// Return the final “unwrapped” data:
-    /// - If a list, a `Vec<String>`.
-    /// - If a dict, a `HashMap<String, Value>`.
-    pub fn defuzz(self) -> Defuzzed {
-        match self {
-            FuzzyValue::List(fl) => Defuzzed::List(fl.defuzz()),
-            FuzzyValue::Dict(fd) => Defuzzed::Dict(fd.defuzz()),
-        }
-    }
-}
-
-/// The final unwrapped data after `.defuzz()`
-#[derive(Debug)]
-pub enum Defuzzed {
-    List(Vec<String>),
-    Dict(HashMap<String, Value>),
-}
-
-/// The top-level “fuzzy(...)” function, akin to `fuzzy(obj)` in Python:
-/// - If `value` is an array of strings, returns a `FuzzyValue::List`.
-/// - If `value` is an object (map) with string keys, returns `FuzzyValue::Dict`.
-/// - Otherwise, error.
-pub fn fuzzy(value: &Value) -> Result<FuzzyValue> {
-    match value {
-        Value::Sequence(seq) => {
-            let mut string_items = Vec::new();
-            for elem in seq {
-                match elem {
-                    Value::String(s) => string_items.push(s.clone()),
-                    _ => {
-                        return Err(eyre!(FuzzyError(
-                            "Sequence contains non-string item".to_string()
-                        )));
-                    }
-                }
-            }
-            Ok(FuzzyValue::List(FuzzyList::new(string_items)))
-        }
-        Value::Mapping(map) => {
-            let mut hm = HashMap::new();
-            for (k, v) in map {
-                let key = match k {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(eyre!(FuzzyError(
-                            "Mapping contains non-string key".to_string()
-                        )));
-                    }
-                };
-                hm.insert(key, v.clone());
-            }
-            Ok(FuzzyValue::Dict(FuzzyDict::new(hm)))
-        }
-        _ => Err(eyre!(FuzzyError(
-            "Value is not sequence or mapping".to_string()
-        ))),
-    }
-}
-
-/// Return true if `item` matches ANY pattern, via:
-/// 1) exact
-/// 2) ignore-case
-/// 3) prefix
-/// 4) substring
-/// 5) glob
-fn matches_any(item: &str, patterns: &[String]) -> bool {
-    for pat in patterns {
-        if matches_fuzzy(item, pat) {
-            return true;
-        }
-    }
-    false
-}
-
-fn matches_fuzzy(item: &str, pat: &str) -> bool {
-    // 1) exact
-    if item == pat {
-        return true;
-    }
-    // 2) ignore case
-    if item.eq_ignore_ascii_case(pat) {
-        return true;
-    }
-    // 3) prefix
-    if item.starts_with(pat) {
-        return true;
-    }
-    // 4) substring
-    if item.contains(pat) {
-        return true;
-    }
-    // 5) glob
-    if let Ok(g) = Pattern::new(pat) {
-        if g.matches(item) {
-            return true;
-        }
-    }
-    false
 }

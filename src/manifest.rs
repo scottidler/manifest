@@ -1,10 +1,12 @@
 // src/manifest.rs
 
 use std::collections::HashMap;
+use crate::config::RepoSpec;
 
 /// The single enum enumerating your "sections."
 /// – The first nine variants store a Vec<String> (for Link, Ppa, Apt, Dnf, Npm, Pip3, Pipx, Flatpak, Cargo).
-/// – The last two variants store a HashMap<String, String> (for Github, Script).
+/// – The Github variant now stores a HashMap<String, RepoSpec> and will render a full clone/link/script block.
+/// – The Script variant stores a HashMap<String, String>.
 #[derive(Debug)]
 pub enum ManifestType {
     Link(Vec<String>),
@@ -16,7 +18,7 @@ pub enum ManifestType {
     Pipx(Vec<String>),
     Flatpak(Vec<String>),
     Cargo(Vec<String>),
-    Github(HashMap<String, String>),
+    Github(HashMap<String, RepoSpec>),
     Script(HashMap<String, String>),
 }
 
@@ -89,7 +91,10 @@ sudo -H pip3 install --upgrade pip setuptools"#;
                 let block  = r#"cargo install"#;
                 render_continue(header, block, items)
             }
-            ManifestType::Github(map) => render_github(map),
+            ManifestType::Github(map) => {
+                // Here we supply the repopath (could be taken from config; here hardcoded as "repos").
+                render_github(map, "repos")
+            }
             ManifestType::Script(map) => render_script(map),
         }
     }
@@ -123,16 +128,8 @@ EOM
 
 /// Helper: renders a continuation-style snippet.
 /// Produces a header followed by a command line where the items are joined
-/// with a " \\\n    " separator, which results in a shell command that spans
-/// multiple indented lines. For example:
-///
-/// echo "apts:"
-///
-/// sudo apt install -y item1 \
-///     item2 \
-///     item3
+/// with a " \\\n    " separator.
 fn render_continue(header: &str, block: &str, items: &[String]) -> String {
-    // Join items with a backslash and a newline for readability.
     let items = items.join(" \\\n    ");
     format!(
 r#"{header}
@@ -145,18 +142,48 @@ r#"{header}
     )
 }
 
-/// Helper: renders the GitHub variant (custom logic).
-fn render_github(map: &HashMap<String, String>) -> String {
+/// Helper: renders the Github variant.
+/// For each repo, it prints:
+///   - A header (echo "<repo_name>:")
+///   - A git clone command using the repo name and the repopath
+///   - A subshell that cd's into the repo and does pull/checkout
+///   - If link items are present, it renders a heredoc snippet via render_heredoc
+///   - If script items are present, it renders them via render_script
+fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
-    out.push_str(r#"echo "github repos:""#);
-    out.push('\n');
-    for (k, v) in map {
-        out.push_str(&format!("echo \"Repo {k}: {v}\"\n"));
+    out.push_str("echo \"github repos:\"\n\n");
+    for (repo_name, repo_spec) in map {
+        // Build the full path for cloning.
+        let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
+        out.push_str(&format!("echo \"{}:\"\n", repo_name));
+        out.push_str(&format!("git clone --recursive https://github.com/{} {} \n", repo_name, repo_path));
+        out.push_str(&format!("(cd {} && pwd && git pull && git checkout HEAD)\n", repo_path));
+
+        // Render links if present.
+        if !repo_spec.link.items.is_empty() || repo_spec.link.recursive {
+            let mut link_lines = Vec::new();
+            // For each link, assume the source is relative to the repo path.
+            for (src, dst) in &repo_spec.link.items {
+                let full_src = format!("{}/{}", repo_path, src);
+                link_lines.push(format!("{} {}", full_src, dst));
+            }
+            if !link_lines.is_empty() {
+                out.push_str("echo \"links:\"\n");
+                out.push_str(&render_heredoc("", "linker $file $link", &link_lines));
+                out.push('\n');
+            }
+        }
+        // Render scripts if present.
+        if !repo_spec.script.items.is_empty() {
+            out.push_str(&render_script(&repo_spec.script.items));
+            out.push('\n');
+        }
+        out.push('\n');
     }
     out
 }
 
-/// Helper: renders the Script variant (custom logic).
+/// Helper: renders the Script variant.
 fn render_script(map: &HashMap<String, String>) -> String {
     if map.is_empty() {
         return "".to_string();
@@ -171,7 +198,7 @@ fn render_script(map: &HashMap<String, String>) -> String {
     out
 }
 
-/// Aggregates all sections into the final script. It deduplicates shell function blocks,
+/// Aggregates all sections into the final script. Deduplicates shell function blocks,
 /// then appends each section’s render() output.
 pub fn build_script(sections: &[ManifestType]) -> String {
     let mut script = String::new();
