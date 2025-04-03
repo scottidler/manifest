@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use regex::Regex;
 use glob::Pattern;
-//use eyre::{Result, eyre};
 
 /// An error type for fuzzy matching issues.
 #[derive(Debug)]
@@ -76,102 +75,110 @@ fn key_matches(key: &str, patterns: &[String], match_types: &[MatchType]) -> boo
     false
 }
 
-/// A fuzzy list built from a list of strings.
-#[derive(Debug, Clone)]
-pub struct FuzzyList {
-    items: Vec<String>,
+/// The unified trait for fuzzy matching. This trait is implemented for both Vec<String>
+/// and HashMap<String, T> so that the same interface can be used.
+pub trait FuzzyOps {
+    type Output;
+    /// Include only items whose string representation matches at least one pattern.
+    fn include(self, patterns: &[String]) -> Self::Output;
+    /// Exclude items that match any of the given patterns.
+    fn exclude(self, patterns: &[String]) -> Self::Output;
+    /// Return the underlying value (akin to "defuzzing" in Python).
+    fn defuzz(self) -> Self::Output;
 }
 
-impl FuzzyList {
-    /// Create a new FuzzyList.
-    pub fn new(items: Vec<String>) -> Self {
-        Self { items }
+/// Implement FuzzyOps for Vec<String> so that a list of strings can be filtered.
+impl FuzzyOps for Vec<String> {
+    type Output = Vec<String>;
+
+    fn include(self, patterns: &[String]) -> Vec<String> {
+        // If any pattern is "*" return all items.
+        if patterns.iter().any(|p| p == "*") {
+            self
+        } else {
+            self.into_iter()
+                .filter(|item| key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
+                .collect()
+        }
     }
 
-    /// Return a new FuzzyList containing only those items whose string value matches at least one pattern.
-    pub fn include(&self, patterns: &[String]) -> Self {
-        let filtered = self
-            .items
-            .iter()
-            .filter(|item| key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
-            .cloned()
-            .collect();
-        FuzzyList { items: filtered }
+    fn exclude(self, patterns: &[String]) -> Vec<String> {
+        if patterns.iter().any(|p| p == "*") {
+            Vec::new()
+        } else {
+            self.into_iter()
+                .filter(|item| !key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
+                .collect()
+        }
     }
 
-    /// Return a new FuzzyList excluding items that match any of the given patterns.
-    pub fn exclude(&self, patterns: &[String]) -> Self {
-        let filtered = self
-            .items
-            .iter()
-            .filter(|item| !key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
-            .cloned()
-            .collect();
-        FuzzyList { items: filtered }
-    }
-
-    /// Unwrap the underlying Vec.
-    pub fn defuzz(self) -> Vec<String> {
-        self.items
-    }
-
-    /// Borrow a slice of the underlying Vec.
-    pub fn as_slice(&self) -> &[String] {
-        &self.items
+    fn defuzz(self) -> Vec<String> {
+        self
     }
 }
 
-/// A generic fuzzy dictionary. This replaces the previous YAML-specific FuzzyDict.
-/// It holds a HashMap with String keys and any type T as values. Its include/exclude methods
-/// filter entries based on fuzzy matching of the keys.
-#[derive(Debug, Clone)]
-pub struct FuzzyDict<T> {
-    pub items: HashMap<String, T>,
-}
+/// Implement FuzzyOps for HashMap<String, T> where T is Clone.
+/// This allows fuzzy filtering based on the keys.
+impl<T: Clone> FuzzyOps for HashMap<String, T> {
+    type Output = HashMap<String, T>;
 
-impl<T: Clone> FuzzyDict<T> {
-    /// Create a new FuzzyDict from a HashMap.
-    pub fn new(items: HashMap<String, T>) -> Self {
-        Self { items }
+    fn include(self, patterns: &[String]) -> HashMap<String, T> {
+        if patterns.iter().any(|p| p == "*") {
+            self
+        } else {
+            self.into_iter()
+                .filter(|(key, _)| key_matches(key, patterns, &DEFAULT_MATCH_TYPES))
+                .collect()
+        }
     }
 
-    /// Include only entries whose keys match ANY of the given patterns.
-    /// If any pattern is "*" then all keys are included.
-    /// Optionally override the match types; otherwise the default match types are used.
-    pub fn include(&self, patterns: &[String], match_types: Option<&[MatchType]>) -> Self {
-        let mts = match_types.unwrap_or(&DEFAULT_MATCH_TYPES);
-        let filtered = self.items.iter()
-            .filter(|(key, _)| {
-                if patterns.iter().any(|p| p == "*") {
-                    true
-                } else {
-                    key_matches(key, patterns, mts)
-                }
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        Self { items: filtered }
+    fn exclude(self, patterns: &[String]) -> HashMap<String, T> {
+        if patterns.iter().any(|p| p == "*") {
+            HashMap::new()
+        } else {
+            self.into_iter()
+                .filter(|(key, _)| !key_matches(key, patterns, &DEFAULT_MATCH_TYPES))
+                .collect()
+        }
     }
 
-    /// Exclude entries whose keys match ANY of the given patterns.
-    /// If any pattern is "*" then all keys are excluded.
-    pub fn exclude(&self, patterns: &[String], match_types: Option<&[MatchType]>) -> Self {
-        let mts = match_types.unwrap_or(&DEFAULT_MATCH_TYPES);
-        let filtered = self.items.iter()
-            .filter(|(key, _)| {
-                if patterns.iter().any(|p| p == "*") {
-                    false
-                } else {
-                    !key_matches(key, patterns, mts)
-                }
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        Self { items: filtered }
-    }
-
-    /// Consume self and return the underlying HashMap.
-    pub fn defuzz(self) -> HashMap<String, T> {
-        self.items
+    fn defuzz(self) -> HashMap<String, T> {
+        self
     }
 }
+
+/// A generic fuzzy entrypoint. It simply returns the object passed in,
+/// which then can be used to call include/exclude/defuzz.
+/// For example:
+///     let filtered = fuzzy(my_vec).include(&patterns).defuzz();
+pub fn fuzzy<T>(obj: T) -> T
+where
+    T: FuzzyOps<Output = T>,
+{
+    obj
+}
+
+// --- Example tests (optional) ---
+//
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     #[test]
+//     fn test_vec_include() {
+//         let items = vec!["apple".to_string(), "banana".to_string(), "apricot".to_string()];
+//         let patterns = vec!["app".to_string()];
+//         let filtered = items.include(&patterns);
+//         assert_eq!(filtered, vec!["apple".to_string(), "apricot".to_string()]);
+//     }
+//
+//     #[test]
+//     fn test_map_include() {
+//         let mut map = HashMap::new();
+//         map.insert("foo".to_string(), 1);
+//         map.insert("bar".to_string(), 2);
+//         let patterns = vec!["ba".to_string()];
+//         let filtered = map.include(&patterns);
+//         assert!(filtered.contains_key("bar"));
+//         assert!(!filtered.contains_key("foo"));
+//     }
+// }

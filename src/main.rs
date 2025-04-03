@@ -2,12 +2,13 @@
 
 mod config;
 mod manifest;
-mod cli;    // your existing CLI code
-mod fuzzy;  // generic fuzzy matching functions
+mod cli;
+mod fuzzy;
 
 use crate::cli::Cli;
 use crate::config::*;
 use crate::manifest::{ManifestType, build_script};
+use crate::fuzzy::fuzzy;
 use clap::Parser;
 use eyre::Result;
 use log::*;
@@ -17,7 +18,7 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 use std::process::Command;
 use walkdir::WalkDir;
-use chrono::Local;  // For timestamp in log separator
+use chrono::Local;
 
 /// Checks whether the given program is available on the system by invoking "command -v".
 fn check_hash(program: &str) -> bool {
@@ -281,12 +282,9 @@ fn main() -> Result<()> {
     }
 
     // 9) Github section.
-    // Wrap the repos in a FuzzyDict, filter with include(), and unwrap with defuzz().
     if complete || !cli.github.is_empty() {
         let matched: HashMap<String, RepoSpec> =
-            fuzzy::FuzzyDict::new(manifest_spec.github.items.clone())
-                .include(&cli.github, None)
-                .defuzz();
+            fuzzy(manifest_spec.github.items.clone());
         if !matched.is_empty() {
             debug!("Adding Github section with {} repos", matched.len());
             sections.push(ManifestType::Github(matched));
