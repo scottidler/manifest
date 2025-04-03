@@ -66,7 +66,7 @@ fn match_str(item: &str, pattern: &str, mt: MatchType) -> bool {
 
 /// The unified trait for fuzzy matching. This trait is implemented for both Vec<String>
 /// and HashMap<String, T> so that the same interface can be used.
-pub trait FuzzyOps {
+pub trait Fuzz {
     type Output;
     /// Include only items whose string representation matches at least one pattern.
     /// (This replicates the Python logic: for each match type in order, filter items using that
@@ -79,7 +79,7 @@ pub trait FuzzyOps {
 }
 
 /// Implementation for Vec<String>.
-impl FuzzyOps for Vec<String> {
+impl Fuzz for Vec<String> {
     type Output = Vec<String>;
 
     fn include(self, patterns: &[String]) -> Vec<String> {
@@ -131,7 +131,7 @@ impl FuzzyOps for Vec<String> {
 }
 
 /// Implementation for HashMap<String, T>.
-impl<T: Clone + PartialEq> FuzzyOps for HashMap<String, T> {
+impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
     type Output = HashMap<String, T>;
 
     fn include(self, patterns: &[String]) -> HashMap<String, T> {
@@ -199,7 +199,7 @@ impl<T: Clone + PartialEq> FuzzyOps for HashMap<String, T> {
 ///     let filtered = fuzzy(my_vec).include(&patterns).defuzz();
 pub fn fuzzy<T>(obj: T) -> T
 where
-    T: FuzzyOps<Output = T>,
+    T: Fuzz<Output = T>,
 {
     obj
 }
