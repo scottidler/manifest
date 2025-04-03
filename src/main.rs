@@ -206,17 +206,19 @@ fn main() -> Result<()> {
     if complete || !cli.link.is_empty() {
         if !manifest_spec.link.items.is_empty() || manifest_spec.link.recursive {
             let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
-            debug!("Adding Link section with {} lines", lines.len());
-            sections.push(ManifestType::Link(sorted_vec(&lines)));
+            // Apply fuzzy matching on links. With our updated Fuzz trait, an empty slice means "match all".
+            let filtered = fuzzy(lines).include(&cli.link);
+            debug!("Adding Link section with {} lines", filtered.len());
+            sections.push(ManifestType::Link(sorted_vec(&filtered)));
         }
     }
 
     // 2) PPA section.
     if complete || !cli.ppa.is_empty() {
-        let items = &manifest_spec.ppa.items;
-        if !items.is_empty() {
-            debug!("Adding Ppa section with {} items", items.len());
-            sections.push(ManifestType::Ppa(sorted_vec(&items.clone())));
+        let ppa_items = fuzzy(manifest_spec.ppa.items.clone()).include(&cli.ppa);
+        if !ppa_items.is_empty() {
+            debug!("Adding Ppa section with {} items", ppa_items.len());
+            sections.push(ManifestType::Ppa(sorted_vec(&ppa_items)));
         }
     }
 
@@ -224,26 +226,29 @@ fn main() -> Result<()> {
     if pkgmgr == "deb" {
         if complete || !cli.apt.is_empty() {
             let merged = merge_pkg_apt(&manifest_spec);
-            if !merged.is_empty() {
-                debug!("Adding Apt section with {} merged items", merged.len());
-                sections.push(ManifestType::Apt(sorted_vec(&merged)));
+            let apt_items = fuzzy(merged).include(&cli.apt);
+            if !apt_items.is_empty() {
+                debug!("Adding Apt section with {} merged items", apt_items.len());
+                sections.push(ManifestType::Apt(sorted_vec(&apt_items)));
             }
         }
     } else if pkgmgr == "rpm" {
         if complete || !cli.dnf.is_empty() {
             let merged = merge_pkg_dnf(&manifest_spec);
-            if !merged.is_empty() {
-                debug!("Adding Dnf section with {} merged items", merged.len());
-                sections.push(ManifestType::Dnf(sorted_vec(&merged)));
+            let dnf_items = fuzzy(merged).include(&cli.dnf);
+            if !dnf_items.is_empty() {
+                debug!("Adding Dnf section with {} merged items", dnf_items.len());
+                sections.push(ManifestType::Dnf(sorted_vec(&dnf_items)));
             }
         }
     }
 
     // 4) NPM section.
     if complete || !cli.npm.is_empty() {
-        if !manifest_spec.npm.items.is_empty() {
-            debug!("Adding Npm section with {} items", manifest_spec.npm.items.len());
-            sections.push(ManifestType::Npm(sorted_vec(&manifest_spec.npm.items.clone())));
+        let npm_items = fuzzy(manifest_spec.npm.items.clone()).include(&cli.npm);
+        if !npm_items.is_empty() {
+            debug!("Adding Npm section with {} items", npm_items.len());
+            sections.push(ManifestType::Npm(sorted_vec(&npm_items)));
         }
     }
 
@@ -251,51 +256,56 @@ fn main() -> Result<()> {
     if complete || !cli.pip3.is_empty() {
         let mut combined = manifest_spec.pip3.items.clone();
         combined.extend_from_slice(&manifest_spec.pip3.distutils);
-        if !combined.is_empty() {
-            debug!("Adding Pip3 section with {} combined items", combined.len());
-            sections.push(ManifestType::Pip3(sorted_vec(&combined)));
+        let pip3_items = fuzzy(combined).include(&cli.pip3);
+        if !pip3_items.is_empty() {
+            debug!("Adding Pip3 section with {} combined items", pip3_items.len());
+            sections.push(ManifestType::Pip3(sorted_vec(&pip3_items)));
         }
     }
 
     // 6) Pipx section.
     if complete || !cli.pipx.is_empty() {
-        if !manifest_spec.pipx.items.is_empty() {
-            debug!("Adding Pipx section with {} items", manifest_spec.pipx.items.len());
-            sections.push(ManifestType::Pipx(sorted_vec(&manifest_spec.pipx.items.clone())));
+        let pipx_items = fuzzy(manifest_spec.pipx.items.clone()).include(&cli.pipx);
+        if !pipx_items.is_empty() {
+            debug!("Adding Pipx section with {} items", pipx_items.len());
+            sections.push(ManifestType::Pipx(sorted_vec(&pipx_items)));
         }
     }
 
     // 7) Flatpak section.
     if complete || !cli.flatpak.is_empty() {
-        if !manifest_spec.flatpak.items.is_empty() {
-            debug!("Adding Flatpak section with {} items", manifest_spec.flatpak.items.len());
-            sections.push(ManifestType::Flatpak(sorted_vec(&manifest_spec.flatpak.items.clone())));
+        let flatpak_items = fuzzy(manifest_spec.flatpak.items.clone()).include(&cli.flatpak);
+        if !flatpak_items.is_empty() {
+            debug!("Adding Flatpak section with {} items", flatpak_items.len());
+            sections.push(ManifestType::Flatpak(sorted_vec(&flatpak_items)));
         }
     }
 
     // 8) Cargo section.
     if complete || !cli.cargo.is_empty() {
-        if !manifest_spec.cargo.items.is_empty() {
-            debug!("Adding Cargo section with {} items", manifest_spec.cargo.items.len());
-            sections.push(ManifestType::Cargo(sorted_vec(&manifest_spec.cargo.items.clone())));
+        let cargo_items = fuzzy(manifest_spec.cargo.items.clone()).include(&cli.cargo);
+        if !cargo_items.is_empty() {
+            debug!("Adding Cargo section with {} items", cargo_items.len());
+            sections.push(ManifestType::Cargo(sorted_vec(&cargo_items)));
         }
     }
 
     // 9) Github section.
     if complete || !cli.github.is_empty() {
-        let matched: HashMap<String, RepoSpec> =
+        let github_items: HashMap<String, RepoSpec> =
             fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
-        if !matched.is_empty() {
-            debug!("Adding Github section with {} repos", matched.len());
-            sections.push(ManifestType::Github(matched));
+        if !github_items.is_empty() {
+            debug!("Adding Github section with {} repos", github_items.len());
+            sections.push(ManifestType::Github(github_items));
         }
     }
 
     // 10) Script section.
     if complete || !cli.script.is_empty() {
-        if !manifest_spec.script.items.is_empty() {
-            debug!("Adding Script section with {} items", manifest_spec.script.items.len());
-            sections.push(ManifestType::Script(sorted_map(&manifest_spec.script.items.clone())));
+        let script_items = fuzzy(manifest_spec.script.items.clone()).include(&cli.script);
+        if !script_items.is_empty() {
+            debug!("Adding Script section with {} items", script_items.len());
+            sections.push(ManifestType::Script(sorted_map(&script_items)));
         }
     }
 

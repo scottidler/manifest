@@ -83,13 +83,13 @@ impl Fuzz for Vec<String> {
     type Output = Vec<String>;
 
     fn include(self, patterns: &[String]) -> Vec<String> {
-        // If any pattern is "*" return all items.
-        if patterns.iter().any(|p| p == "*") {
+        // If no patterns are given or any pattern is "*" return all items.
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
             return self;
         }
-        let items = self; // consume self; we use items by reference below
+        let items = self; // consume self
         for &mt in DEFAULT_MATCH_TYPES.iter() {
-            // For each match type, filter items: for an item to match, at least one pattern must match
+            // For each match type, filter items: for an item to match, at least one pattern must match.
             let results: Vec<String> = items
                 .iter()
                 .cloned()
@@ -105,7 +105,8 @@ impl Fuzz for Vec<String> {
     }
 
     fn exclude(self, patterns: &[String]) -> Vec<String> {
-        if patterns.iter().any(|p| p == "*") {
+        // If no patterns are given or any pattern is "*" then nothing should be kept.
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
             return Vec::new();
         }
         let items = self;
@@ -135,10 +136,10 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
     type Output = HashMap<String, T>;
 
     fn include(self, patterns: &[String]) -> HashMap<String, T> {
-        if patterns.iter().any(|p| p == "*") {
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
             return self;
         }
-        // First, collect the keys.
+        // Collect keys from the hashmap.
         let keys: Vec<String> = self.keys().cloned().collect();
         for &mt in DEFAULT_MATCH_TYPES.iter() {
             let matched_keys: Vec<String> = keys
@@ -150,7 +151,6 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
                 .collect();
             if !matched_keys.is_empty() {
                 // Build a new HashMap from keys that matched.
-                // (Clone self so we can filter without consuming it.)
                 let cloned = self.clone();
                 let result: HashMap<String, T> = cloned
                     .into_iter()
@@ -163,7 +163,7 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
     }
 
     fn exclude(self, patterns: &[String]) -> HashMap<String, T> {
-        if patterns.iter().any(|p| p == "*") {
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
             return HashMap::new();
         }
         let keys: Vec<String> = self.keys().cloned().collect();
