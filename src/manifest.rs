@@ -101,7 +101,10 @@ sudo -H pip3 install --upgrade pip setuptools"#;
 }
 
 /// Helper: renders a heredoc-style snippet.
-/// Produces:
+///
+/// Produces either:
+///
+/// If `header` is non-empty:
 /// {header}
 ///
 /// while read -r file link; do
@@ -109,9 +112,25 @@ sudo -H pip3 install --upgrade pip setuptools"#;
 /// done<<EOM
 /// {items}
 /// EOM
+///
+/// If `header` is empty, then the while loop starts immediately:
+/// while read -r file link; do
+///   {block}
+/// done<<EOM
+/// {items}
+/// EOM
 fn render_heredoc(header: &str, block: &str, items: &[String]) -> String {
     let items = items.join("\n");
-    format!(
+    if header.is_empty() {
+        format!(
+"while read -r file link; do
+    {block}
+done<<EOM
+{items}
+EOM
+", block = block, items = items)
+    } else {
+        format!(
 r#"{header}
 
 while read -r file link; do
@@ -120,10 +139,11 @@ done<<EOM
 {items}
 EOM
 "#,
-        header = header,
-        block = block,
-        items = items
-    )
+            header = header,
+            block = block,
+            items = items
+        )
+    }
 }
 
 /// Helper: renders a continuation-style snippet.
@@ -169,6 +189,7 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
             }
             if !link_lines.is_empty() {
                 out.push_str("echo \"links:\"\n");
+                // Call render_heredoc with an empty header so that the while loop starts immediately.
                 out.push_str(&render_heredoc("", "linker $file $link", &link_lines));
                 out.push('\n');
             }
