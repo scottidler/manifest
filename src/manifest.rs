@@ -28,10 +28,8 @@ impl ManifestType {
     /// Return any needed shell functions; deduplication will occur in build_script().
     pub fn functions(&self) -> String {
         match self {
-            // Link and Github need the linker function.
             ManifestType::Link(_) => LINKER.to_string(),
             ManifestType::Github(_) => LINKER.to_string(),
-            // Script needs the latest function.
             ManifestType::Script(_) => LATEST.to_string(),
             _ => "".to_string(),
         }
@@ -40,13 +38,11 @@ impl ManifestType {
     /// Return the final shell snippet for this variant.
     pub fn render(&self) -> String {
         match self {
-            // 1) Link – heredoc style.
             ManifestType::Link(items) => {
                 let header = r#"echo "links:""#;
-                let block  = r#"linker "$pkg" "/some/dest""#;
+                let block  = r#"linker $file $link"#;
                 render_heredoc(header, block, items)
             }
-            // 2) Ppa – heredoc.
             ManifestType::Ppa(items) => {
                 let header = r#"echo "ppas:""#;
                 let block  = r#"ppas=$(somecheck)
@@ -55,26 +51,22 @@ if [[ $ppas != *"$pkg"* ]]; then
 fi"#;
                 render_heredoc(header, block, items)
             }
-            // 3) Apt – continue style.
             ManifestType::Apt(items) => {
                 let header = r#"echo "apts:"
 sudo apt update && sudo apt upgrade -y && sudo apt install -y software-properties-common"#;
                 let block  = r#"sudo apt install -y"#;
                 render_continue(header, block, items)
             }
-            // 4) Dnf – continue.
             ManifestType::Dnf(items) => {
                 let header = r#"echo "dnf packages:""#;
                 let block  = r#"sudo dnf install -y"#;
                 render_continue(header, block, items)
             }
-            // 5) Npm – continue.
             ManifestType::Npm(items) => {
                 let header = r#"echo "npm packages:""#;
                 let block  = r#"sudo npm install -g"#;
                 render_continue(header, block, items)
             }
-            // 6) Pip3 – continue.
             ManifestType::Pip3(items) => {
                 let header = r#"echo "pip3 packages:"
 sudo apt-get install -y python3-dev
@@ -82,27 +74,22 @@ sudo -H pip3 install --upgrade pip setuptools"#;
                 let block  = r#"sudo -H pip3 install --upgrade"#;
                 render_continue(header, block, items)
             }
-            // 7) Pipx – heredoc.
             ManifestType::Pipx(items) => {
                 let header = r#"echo "pipx:""#;
                 let block  = r#"pipx install "$pkg""#;
                 render_heredoc(header, block, items)
             }
-            // 8) Flatpak – continue.
             ManifestType::Flatpak(items) => {
                 let header = r#"echo "flatpaks:""#;
                 let block  = r#"flatpak install --assumeyes --or-update"#;
                 render_continue(header, block, items)
             }
-            // 9) Cargo – continue.
             ManifestType::Cargo(items) => {
                 let header = r#"echo "cargo crates:""#;
                 let block  = r#"cargo install"#;
                 render_continue(header, block, items)
             }
-            // 10) Github – custom.
             ManifestType::Github(map) => render_github(map),
-            // 11) Script – custom.
             ManifestType::Script(map) => render_script(map),
         }
     }
@@ -112,25 +99,25 @@ sudo -H pip3 install --upgrade pip setuptools"#;
 /// Produces:
 /// {header}
 ///
-/// while read pkg; do
+/// while read -r file link; do
 ///   {block}
 /// done<<EOM
-/// {joined_items}
+/// {items}
 /// EOM
 fn render_heredoc(header: &str, block: &str, items: &[String]) -> String {
-    let joined = items.join("\n");
+    let items = items.join("\n");
     format!(
 r#"{header}
 
-while read pkg; do
-{block}
+while read -r file link; do
+    {block}
 done<<EOM
 {items}
 EOM
 "#,
         header = header,
         block = block,
-        items = joined
+        items = items
     )
 }
 
@@ -138,9 +125,9 @@ EOM
 /// Produces:
 /// {header}
 ///
-/// {block} {joined_items}
+/// {block} {items}
 fn render_continue(header: &str, block: &str, items: &[String]) -> String {
-    let joined = items.join(" ");
+    let items = items.join(" ");
     format!(
 r#"{header}
 
@@ -148,7 +135,7 @@ r#"{header}
 "#,
         header = header,
         block = block,
-        items = joined
+        items = items
     )
 }
 
@@ -183,7 +170,12 @@ fn render_script(map: &HashMap<String, String>) -> String {
 pub fn build_script(sections: &[ManifestType]) -> String {
     let mut script = String::new();
     script.push_str("#!/bin/bash\n");
-    script.push_str("# generated from Rust enum approach\n\n");
+    script.push_str("# generated file by manifest\n");
+    script.push_str("# src: https://github.com/scottidler/manifest\n\n");
+    script.push_str("if [ -n \"$DEBUG\" ]; then\n");
+    script.push_str("    PS4=':${LINENO}+'\n");
+    script.push_str("    set -x\n");
+    script.push_str("fi\n\n");
 
     let mut blocks = Vec::new();
     for sec in sections {
