@@ -2,15 +2,6 @@
 
 use clap::{ArgAction, Parser};
 
-/// A single struct using Clap Derive, closely matching the Python argparse approach.
-///
-/// Behavior of each argument:
-/// - If the user runs `--link` with no arguments => `link=["*"]`.
-/// - If the user omits `--link` => `link=[]`.
-/// - If the user types `--link foo bar` => `link=["foo","bar"]`.
-///
-/// And so on for the other sub-commands (`ppa`, `apt`, `dnf`, `npm`, `pip3`, `pipx`,
-/// `flatpak`, `cargo`, `github`, and `script`).
 #[derive(Debug, Parser)]
 #[command(
     name = "manifest",
@@ -18,7 +9,6 @@ use clap::{ArgAction, Parser};
     about = "Generate a Bash script from a YAML manifest describing your config."
 )]
 pub struct Cli {
-    /// The path to the YAML config file
     #[arg(
         short = 'C',
         long = "config",
@@ -27,7 +17,6 @@ pub struct Cli {
     )]
     pub config: String,
 
-    /// The path to treat as CWD
     #[arg(
         short = 'D',
         long = "cwd",
@@ -36,7 +25,6 @@ pub struct Cli {
     )]
     pub cwd: String,
 
-    /// The HOME directory override
     #[arg(
         short = 'H',
         long = "home",
@@ -45,7 +33,6 @@ pub struct Cli {
     )]
     pub home: String,
 
-    /// Package manager override; e.g. 'deb', 'rpm', or 'brew'
     #[arg(
         short = 'M',
         long = "pkgmgr",
@@ -54,8 +41,6 @@ pub struct Cli {
     )]
     pub pkgmgr: String,
 
-    /// If the user runs `--link` with zero arguments => link=["*"], otherwise
-    /// specify patterns like `--link foo bar`
     #[arg(
         short = 'l',
         long = "link",
@@ -168,8 +153,6 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Returns true if any of the sub-commands for partial usage were specified.
-    /// If false, that implies "complete" mode.
     pub fn any_section_specified(&self) -> bool {
         !self.link.is_empty()
             || !self.ppa.is_empty()

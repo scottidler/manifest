@@ -20,7 +20,6 @@ use std::process::Command;
 use walkdir::WalkDir;
 use chrono::Local;
 
-/// Checks whether the given program is available on the system by invoking "command -v".
 fn check_hash(program: &str) -> bool {
     debug!("check_hash: checking for program {}", program);
     let output = Command::new("sh")
@@ -40,7 +39,6 @@ fn check_hash(program: &str) -> bool {
     }
 }
 
-/// Determines the package manager in use by querying the system.
 fn get_pkgmgr() -> Result<String> {
     if check_hash("dpkg") {
         debug!("get_pkgmgr: detected dpkg");
@@ -56,7 +54,6 @@ fn get_pkgmgr() -> Result<String> {
     }
 }
 
-/// Returns a sorted clone of a vector of Strings.
 fn sorted_vec(vec: &[String]) -> Vec<String> {
     debug!("sorted_vec: received input vector with {} items", vec.len());
     let mut v = vec.to_vec();
@@ -65,7 +62,6 @@ fn sorted_vec(vec: &[String]) -> Vec<String> {
     v
 }
 
-/// Returns a new HashMap sorted by key.
 fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
     debug!("sorted_map: received map with {} entries", map.len());
     let mut keys: Vec<_> = map.keys().collect();
@@ -80,7 +76,6 @@ fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
     sorted
 }
 
-/// Converts the LinkSpec into a Vec<String> where each string is a line of "src dst"
 fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
     debug!("linkspec_to_vec: starting with spec = {:?}", spec);
     let mut lines = Vec::new();
@@ -187,7 +182,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     debug!("Parsed CLI arguments: {:?}", cli);
 
-    // Parse the YAML config.
     let file = File::open(&cli.config)?;
     debug!("Opened config file: {}", cli.config);
     let mut reader = BufReader::new(file);
@@ -202,18 +196,15 @@ fn main() -> Result<()> {
 
     let mut sections: Vec<ManifestType> = Vec::new();
 
-    // 1) Link section.
     if complete || !cli.link.is_empty() {
         if !manifest_spec.link.items.is_empty() || manifest_spec.link.recursive {
             let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
-            // Apply fuzzy matching on links. With our updated Fuzz trait, an empty slice means "match all".
             let filtered = fuzzy(lines).include(&cli.link);
             debug!("Adding Link section with {} lines", filtered.len());
             sections.push(ManifestType::Link(sorted_vec(&filtered)));
         }
     }
 
-    // 2) PPA section.
     if complete || !cli.ppa.is_empty() {
         let ppa_items = fuzzy(manifest_spec.ppa.items.clone()).include(&cli.ppa);
         if !ppa_items.is_empty() {
@@ -222,7 +213,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 3) Apt/Dnf section.
     if pkgmgr == "deb" {
         if complete || !cli.apt.is_empty() {
             let merged = merge_pkg_apt(&manifest_spec);
@@ -243,7 +233,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 4) NPM section.
     if complete || !cli.npm.is_empty() {
         let npm_items = fuzzy(manifest_spec.npm.items.clone()).include(&cli.npm);
         if !npm_items.is_empty() {
@@ -252,7 +241,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 5) Pip3 section.
     if complete || !cli.pip3.is_empty() {
         let mut combined = manifest_spec.pip3.items.clone();
         combined.extend_from_slice(&manifest_spec.pip3.distutils);
@@ -263,7 +251,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 6) Pipx section.
     if complete || !cli.pipx.is_empty() {
         let pipx_items = fuzzy(manifest_spec.pipx.items.clone()).include(&cli.pipx);
         if !pipx_items.is_empty() {
@@ -272,7 +259,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 7) Flatpak section.
     if complete || !cli.flatpak.is_empty() {
         let flatpak_items = fuzzy(manifest_spec.flatpak.items.clone()).include(&cli.flatpak);
         if !flatpak_items.is_empty() {
@@ -281,7 +267,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 8) Cargo section.
     if complete || !cli.cargo.is_empty() {
         let cargo_items = fuzzy(manifest_spec.cargo.items.clone()).include(&cli.cargo);
         if !cargo_items.is_empty() {
@@ -290,7 +275,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 9) Github section.
     if complete || !cli.github.is_empty() {
         let github_items: HashMap<String, RepoSpec> =
             fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
@@ -300,7 +284,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // 10) Script section.
     if complete || !cli.script.is_empty() {
         let script_items = fuzzy(manifest_spec.script.items.clone()).include(&cli.script);
         if !script_items.is_empty() {
