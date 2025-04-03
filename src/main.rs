@@ -8,7 +8,7 @@ mod fuzzy;
 use crate::cli::Cli;
 use crate::config::*;
 use crate::manifest::{ManifestType, build_script};
-use crate::fuzzy::fuzzy;
+use crate::fuzzy::*;
 use clap::Parser;
 use eyre::Result;
 use log::*;
@@ -284,7 +284,7 @@ fn main() -> Result<()> {
     // 9) Github section.
     if complete || !cli.github.is_empty() {
         let matched: HashMap<String, RepoSpec> =
-            fuzzy(manifest_spec.github.items.clone());
+            fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
         if !matched.is_empty() {
             debug!("Adding Github section with {} repos", matched.len());
             sections.push(ManifestType::Github(matched));
