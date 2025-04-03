@@ -31,6 +31,7 @@ pub enum MatchType {
 }
 
 /// The default match types (in order) to try when matching a key.
+/// (Note: This mirrors the Python default: EXACT, IGNORECASE, PREFIX, CONTAINS.)
 pub const DEFAULT_MATCH_TYPES: [MatchType; 4] = [
     MatchType::Exact,
     MatchType::IgnoreCase,
@@ -63,23 +64,13 @@ fn match_str(item: &str, pattern: &str, mt: MatchType) -> bool {
     }
 }
 
-/// Returns true if the given key matches any of the provided patterns using one or more match types.
-fn key_matches(key: &str, patterns: &[String], match_types: &[MatchType]) -> bool {
-    for pattern in patterns {
-        for &mt in match_types {
-            if match_str(key, pattern, mt) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// The unified trait for fuzzy matching. This trait is implemented for both Vec<String>
 /// and HashMap<String, T> so that the same interface can be used.
 pub trait FuzzyOps {
     type Output;
     /// Include only items whose string representation matches at least one pattern.
+    /// (This replicates the Python logic: for each match type in order, filter items using that
+    /// match function—returning the first non-empty set.)
     fn include(self, patterns: &[String]) -> Self::Output;
     /// Exclude items that match any of the given patterns.
     fn exclude(self, patterns: &[String]) -> Self::Output;
@@ -87,29 +78,51 @@ pub trait FuzzyOps {
     fn defuzz(self) -> Self::Output;
 }
 
-/// Implement FuzzyOps for Vec<String> so that a list of strings can be filtered.
+/// Implementation for Vec<String>.
 impl FuzzyOps for Vec<String> {
     type Output = Vec<String>;
 
     fn include(self, patterns: &[String]) -> Vec<String> {
         // If any pattern is "*" return all items.
         if patterns.iter().any(|p| p == "*") {
-            self
-        } else {
-            self.into_iter()
-                .filter(|item| key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
-                .collect()
+            return self;
         }
+        let items = self; // consume self; we use items by reference below
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            // For each match type, filter items: for an item to match, at least one pattern must match
+            let results: Vec<String> = items
+                .iter()
+                .cloned()
+                .filter(|item| {
+                    patterns.iter().any(|pattern| match_str(item, pattern, mt))
+                })
+                .collect();
+            if !results.is_empty() {
+                return results;
+            }
+        }
+        Vec::new()
     }
 
     fn exclude(self, patterns: &[String]) -> Vec<String> {
         if patterns.iter().any(|p| p == "*") {
-            Vec::new()
-        } else {
-            self.into_iter()
-                .filter(|item| !key_matches(item, patterns, &DEFAULT_MATCH_TYPES))
-                .collect()
+            return Vec::new();
         }
+        let items = self;
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            let results: Vec<String> = items
+                .iter()
+                .cloned()
+                .filter(|item| {
+                    // For exclude, an item is kept only if it does NOT match any pattern for the given match type.
+                    patterns.iter().all(|pattern| !match_str(item, pattern, mt))
+                })
+                .collect();
+            if !results.is_empty() {
+                return results;
+            }
+        }
+        Vec::new()
     }
 
     fn defuzz(self) -> Vec<String> {
@@ -117,29 +130,62 @@ impl FuzzyOps for Vec<String> {
     }
 }
 
-/// Implement FuzzyOps for HashMap<String, T> where T is Clone.
-/// This allows fuzzy filtering based on the keys.
-impl<T: Clone> FuzzyOps for HashMap<String, T> {
+/// Implementation for HashMap<String, T>.
+impl<T: Clone + PartialEq> FuzzyOps for HashMap<String, T> {
     type Output = HashMap<String, T>;
 
     fn include(self, patterns: &[String]) -> HashMap<String, T> {
         if patterns.iter().any(|p| p == "*") {
-            self
-        } else {
-            self.into_iter()
-                .filter(|(key, _)| key_matches(key, patterns, &DEFAULT_MATCH_TYPES))
-                .collect()
+            return self;
         }
+        // First, collect the keys.
+        let keys: Vec<String> = self.keys().cloned().collect();
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            let matched_keys: Vec<String> = keys
+                .iter()
+                .cloned()
+                .filter(|key| {
+                    patterns.iter().any(|pattern| match_str(key, pattern, mt))
+                })
+                .collect();
+            if !matched_keys.is_empty() {
+                // Build a new HashMap from keys that matched.
+                // (Clone self so we can filter without consuming it.)
+                let cloned = self.clone();
+                let result: HashMap<String, T> = cloned
+                    .into_iter()
+                    .filter(|(key, _)| matched_keys.contains(key))
+                    .collect();
+                return result;
+            }
+        }
+        HashMap::new()
     }
 
     fn exclude(self, patterns: &[String]) -> HashMap<String, T> {
         if patterns.iter().any(|p| p == "*") {
-            HashMap::new()
-        } else {
-            self.into_iter()
-                .filter(|(key, _)| !key_matches(key, patterns, &DEFAULT_MATCH_TYPES))
-                .collect()
+            return HashMap::new();
         }
+        let keys: Vec<String> = self.keys().cloned().collect();
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            let remaining_keys: Vec<String> = keys
+                .iter()
+                .cloned()
+                .filter(|key| {
+                    // Keep key only if for the given match type, none of the patterns match.
+                    patterns.iter().all(|pattern| !match_str(key, pattern, mt))
+                })
+                .collect();
+            if !remaining_keys.is_empty() {
+                let cloned = self.clone();
+                let result: HashMap<String, T> = cloned
+                    .into_iter()
+                    .filter(|(key, _)| remaining_keys.contains(key))
+                    .collect();
+                return result;
+            }
+        }
+        HashMap::new()
     }
 
     fn defuzz(self) -> HashMap<String, T> {
@@ -168,6 +214,7 @@ where
 //         let items = vec!["apple".to_string(), "banana".to_string(), "apricot".to_string()];
 //         let patterns = vec!["app".to_string()];
 //         let filtered = items.include(&patterns);
+//         // For DEFAULT_MATCH_TYPES, "Exact" won’t match, but "Prefix" will: "apple" and "apricot"
 //         assert_eq!(filtered, vec!["apple".to_string(), "apricot".to_string()]);
 //     }
 //

@@ -46,7 +46,7 @@ pub struct ManifestSpec {
 /// For linking files:
 /// - `recursive`: optional bool
 /// - `items`: a map from src->dst
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct LinkSpec {
     #[serde(default)]
     pub recursive: bool,
@@ -122,7 +122,7 @@ pub struct CargoSpec {
 }
 
 /// For script, we store "items" as a HashMap of scriptName->scriptBody
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct ScriptSpec {
     #[serde(default)]
     pub items: HashMap<String, String>,
@@ -144,7 +144,7 @@ fn default_repopath() -> String {
 }
 
 /// Each named repository is a struct that can have link + script
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct RepoSpec {
     #[serde(default)]
     pub link: LinkSpec,
