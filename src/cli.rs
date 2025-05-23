@@ -18,14 +18,6 @@ pub struct Cli {
     pub config: String,
 
     #[arg(
-        short = 'D',
-        long = "cwd",
-        default_value = ".",
-        help = "Set the working directory"
-    )]
-    pub cwd: String,
-
-    #[arg(
         short = 'H',
         long = "home",
         default_value = "",
@@ -150,6 +142,13 @@ pub struct Cli {
         help = "Specify list of glob patterns to match script items"
     )]
     pub script: Vec<String>,
+
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Optional positional path to operate on; defaults to the current working directory"
+    )]
+    pub path: String,
 }
 
 impl Cli {

@@ -46,6 +46,7 @@ pkg:
   - anki
   - flatpak
   - gnome-software-plugin-flatpak
+  - gnome-shell-extension-manager
   - apt-transport-https
   - ca-certificates
   - curl

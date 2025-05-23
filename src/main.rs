@@ -79,7 +79,7 @@ fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
 fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
     debug!("linkspec_to_vec: starting with spec = {:?}", spec);
     let mut lines = Vec::new();
-    let cwd = Path::new(&cli.cwd);
+    let cwd = Path::new(&cli.path);
     debug!("linkspec_to_vec: current working directory = {:?}", cwd);
 
     let home = if cli.home.is_empty() {
