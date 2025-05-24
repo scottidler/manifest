@@ -135,11 +135,19 @@ r#"{header}
 fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
     out.push_str("echo \"github repos:\"\n\n");
+
     for (repo_name, repo_spec) in map {
         let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
+
         out.push_str(&format!("echo \"{}:\"\n", repo_name));
-        out.push_str(&format!("git clone --recursive https://github.com/{} {} \n", repo_name, repo_path));
-        out.push_str(&format!("(cd {} && pwd && git pull && git checkout HEAD)\n", repo_path));
+        out.push_str(&format!(
+            "git clone --recursive https://github.com/{} {} \n",
+            repo_name, repo_path
+        ));
+        out.push_str(&format!(
+            "(cd {} && pwd && git pull && git checkout HEAD)\n",
+            repo_path
+        ));
 
         if !repo_spec.link.items.is_empty() || repo_spec.link.recursive {
             let mut link_lines = Vec::new();
@@ -153,15 +161,30 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
                 out.push('\n');
             }
         }
+
+        if !repo_spec.cargo.is_empty() {
+            out.push_str("echo \"cargo install (path):\"\n");
+            for rel_path in &repo_spec.cargo {
+                let install_dir = format!("{}/{}", repo_path, rel_path);
+                out.push_str(&format!("echo \"Installing from {}\"\n", install_dir));
+                out.push_str(&format!(
+                    "(cd {} && cargo install --path .)\n",
+                    install_dir
+                ));
+            }
+            out.push('\n');
+        }
+
         if !repo_spec.script.items.is_empty() {
             out.push_str(&render_script(&repo_spec.script.items));
             out.push('\n');
         }
+
         out.push('\n');
     }
+
     out
 }
-
 fn render_script(map: &HashMap<String, String>) -> String {
     if map.is_empty() {
         return "".to_string();

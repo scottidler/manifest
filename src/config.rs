@@ -127,6 +127,8 @@ pub struct RepoSpec {
     #[serde(default)]
     pub link: LinkSpec,
     #[serde(default)]
+    pub cargo: Vec<String>,
+    #[serde(default)]
     pub script: ScriptSpec,
 }
 

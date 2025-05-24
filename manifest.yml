@@ -46,7 +46,6 @@ pkg:
   - anki
   - flatpak
   - gnome-software-plugin-flatpak
-  - gnome-shell-extension-manager
   - apt-transport-https
   - ca-certificates
   - curl
@@ -185,6 +184,43 @@ cargo:
   - zoxide
 
 github:
+  scottidler/aka:
+    cargo:
+    - ./
+  scottidler/cidr:
+    cargo:
+    - ./
+  scottidler/dashify:
+    cargo:
+    - ./
+  scottidler/kat:
+    cargo:
+    - ./
+  scottidler/git-tools:
+    cargo:
+    - ls-git-repos
+    - ls-github-repos
+    - ls-owners
+    - ls-stale-branches
+    - ls-stale-prs
+  scottidler/nerf:
+    cargo:
+    - ./
+  scottidler/requote:
+    cargo:
+    - ./
+  scottidler/rkvr:
+    cargo:
+    - ./
+  scottidler/scrabbler:
+    cargo:
+    - ./
+  scottidler/slam:
+    cargo:
+    - ./
+  scottidler/workweek:
+    cargo:
+    - ./
   scottidler/git:
     link:
       bin/clone: ~/bin/clone
@@ -201,7 +237,6 @@ github:
       bin/tmp: ~/bin/tmp
   scottidler/helpful:
     link:
-      bin/cidr: ~/bin/cidr
       bin/say: ~/bin/say
       bin/speedtest: ~/bin/speedtest
       bin/tab: ~/bin/tab
