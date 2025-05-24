@@ -1,7 +1,7 @@
 // src/manifest.rs
 
 use std::collections::HashMap;
-use crate::config::RepoSpec;
+use crate::config::{RepoSpec, LinkSpec};
 
 #[derive(Debug)]
 pub enum ManifestType {
@@ -132,6 +132,8 @@ r#"{header}
     )
 }
 
+// src/manifest.rs
+
 fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
     out.push_str("echo \"github repos:\"\n\n");
@@ -139,6 +141,7 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     for (repo_name, repo_spec) in map {
         let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
 
+        // 1) Clone & update
         out.push_str(&format!("echo \"{}:\"\n", repo_name));
         out.push_str(&format!(
             "git clone --recursive https://github.com/{} {} \n",
@@ -149,42 +152,60 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
             repo_path
         ));
 
-        if !repo_spec.link.items.is_empty() || repo_spec.link.recursive {
-            let mut link_lines = Vec::new();
-            for (src, dst) in &repo_spec.link.items {
-                let full_src = format!("{}/{}", repo_path, src);
-                link_lines.push(format!("{} {}", full_src, dst));
-            }
-            if !link_lines.is_empty() {
-                out.push_str("echo \"links:\"\n");
-                out.push_str(&render_heredoc("", "linker $file $link", &link_lines));
-                out.push('\n');
-            }
-        }
+        // 2) Links (no-op if none)
+        out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
 
-        if !repo_spec.cargo.is_empty() {
-            out.push_str("echo \"cargo install (path):\"\n");
-            for rel_path in &repo_spec.cargo {
-                let install_dir = format!("{}/{}", repo_path, rel_path);
-                out.push_str(&format!("echo \"Installing from {}\"\n", install_dir));
-                out.push_str(&format!(
-                    "(cd {} && cargo install --path .)\n",
-                    install_dir
-                ));
-            }
-            out.push('\n');
-        }
+        // 3) Cargo‐install‐path (no-op if none)
+        out.push_str(&render_repo_cargo_install(&repo_path, &repo_spec.cargo));
 
-        if !repo_spec.script.items.is_empty() {
-            out.push_str(&render_script(&repo_spec.script.items));
-            out.push('\n');
-        }
+        // 4) Scripts (render_script itself skips on empty)
+        out.push_str(&render_script(&repo_spec.script.items));
+        out.push('\n');
 
         out.push('\n');
     }
 
     out
 }
+
+fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
+    if link_spec.items.is_empty() && !link_spec.recursive {
+        return String::new();
+    }
+
+    let mut link_lines = Vec::new();
+    for (src, dst) in &link_spec.items {
+        let full_src = format!("{}/{}", repo_path, src);
+        link_lines.push(format!("{} {}", full_src, dst));
+    }
+
+    let mut out = String::new();
+    out.push_str("echo \"links:\"\n");
+    out.push_str(&render_heredoc("", "linker $file $link", &link_lines));
+    out.push('\n');
+    out
+}
+
+/// Render per-repo `cargo install --path` section.
+fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("echo \"cargo install (path):\"\n");
+    for rel_path in paths {
+        let install_dir = format!("{}/{}", repo_path, rel_path);
+        out.push_str(&format!("echo \"Installing from {}\"\n", install_dir));
+        out.push_str(&format!(
+            "(cd {} && cargo install --path .)\n",
+            install_dir
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 fn render_script(map: &HashMap<String, String>) -> String {
     if map.is_empty() {
         return "".to_string();
