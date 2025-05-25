@@ -187,6 +187,10 @@ github:
   scottidler/aka:
     cargo:
     - ./
+    link:
+      bin/aka.zsh: ~/.config/aka/aka.zsh
+      bin/aka-loader.zsh: ~/.shell-functions.d/aka-loader.zsh
+      bin/aka-completion.zsh: ~/.shell-functions.d/aka-completion.zsh
   scottidler/cidr:
     cargo:
     - ./
@@ -297,6 +301,9 @@ github:
   robbyrussell/oh-my-zsh:
     link:
       ./: ~/.oh-my-zsh
+  zsh-users/zsh-autosuggestions:
+    link:
+      ./: ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions
   awslabs/git-secrets:
     link:
       git-secrets: ~/bin/git-secrets
