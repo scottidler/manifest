@@ -132,42 +132,6 @@ r#"{header}
     )
 }
 
-// src/manifest.rs
-
-fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
-    let mut out = String::new();
-    out.push_str("echo \"github repos:\"\n\n");
-
-    for (repo_name, repo_spec) in map {
-        let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
-
-        // 1) Clone & update
-        out.push_str(&format!("echo \"{}:\"\n", repo_name));
-        out.push_str(&format!(
-            "git clone --recursive https://github.com/{} {} \n",
-            repo_name, repo_path
-        ));
-        out.push_str(&format!(
-            "(cd {} && pwd && git pull && git checkout HEAD)\n",
-            repo_path
-        ));
-
-        // 2) Links (no-op if none)
-        out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
-
-        // 3) Cargo‐install‐path (no-op if none)
-        out.push_str(&render_repo_cargo_install(&repo_path, &repo_spec.cargo));
-
-        // 4) Scripts (render_script itself skips on empty)
-        out.push_str(&render_script(&repo_spec.script.items));
-        out.push('\n');
-
-        out.push('\n');
-    }
-
-    out
-}
-
 fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
     if link_spec.items.is_empty() && !link_spec.recursive {
         return String::new();
@@ -203,6 +167,36 @@ fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
         ));
     }
     out.push('\n');
+    out
+}
+
+fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
+    let mut out = String::new();
+    out.push_str("echo \"github repos:\"\n\n");
+
+    for (repo_name, repo_spec) in map {
+        let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
+
+        out.push_str(&format!("echo \"{}:\"\n", repo_name));
+        out.push_str(&format!(
+            "git clone --recursive https://github.com/{} {} \n",
+            repo_name, repo_path
+        ));
+        out.push_str(&format!(
+            "(cd {} && pwd && git pull && git checkout HEAD)\n",
+            repo_path
+        ));
+
+        out.push_str(&render_repo_cargo_install(&repo_path, &repo_spec.cargo));
+
+        out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
+
+        out.push_str(&render_script(&repo_spec.script.items));
+        out.push('\n');
+
+        out.push('\n');
+    }
+
     out
 }
 
