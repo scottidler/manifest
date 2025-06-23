@@ -191,6 +191,9 @@ github:
       bin/aka.zsh: ~/.config/aka/aka.zsh
       bin/_aka_commands: ~/.shell-completions.d/_aka_commands
       bin/aka-loader.zsh: ~/.shell-functions.d/aka-loader.zsh
+  scottidler/nvim:
+    link:
+      ./: ~/.config/nvim/
   scottidler/cidr:
     cargo:
     - ./
