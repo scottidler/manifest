@@ -192,7 +192,8 @@ fn main() -> Result<()> {
                 Cli::command().print_help().unwrap();
                 println!("");
             }
-            return Err(e).wrap_err_with(|| format!("Failed to open config file: {}", cli.config.red()));
+            eprintln!("Error: Failed to open config file: {}", cli.config.red());
+            std::process::exit(1);
         }
     };
     debug!("Opened config file: {}", cli.config);
