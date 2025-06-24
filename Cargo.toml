@@ -2,6 +2,11 @@
 name = "manifest"
 version = "0.1.0"
 edition = "2024"
+description = "A tool for managing system configurations and installations via YAML manifests"
+license = "MIT"
+repository = "https://github.com/scottidler/manifest"
+homepage = "https://github.com/scottidler/manifest"
+documentation = "https://github.com/scottidler/manifest"
 
 [dependencies]
 chrono = "0.4.41"
