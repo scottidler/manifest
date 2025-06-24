@@ -106,6 +106,7 @@ pub struct CargoSpec {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct ScriptSpec {
     #[serde(default)]
+    #[serde(flatten)]
     pub items: HashMap<String, String>,
 }
 
