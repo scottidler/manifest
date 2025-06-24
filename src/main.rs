@@ -11,6 +11,7 @@ use crate::manifest::{ManifestType, build_script};
 use crate::fuzzy::*;
 use clap::Parser;
 use eyre::Result;
+use eyre::WrapErr;
 use log::*;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -19,6 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use walkdir::WalkDir;
 use chrono::Local;
+use colored::*;
 
 fn check_hash(program: &str) -> bool {
     debug!("check_hash: checking for program {}", program);
@@ -182,16 +184,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     debug!("Parsed CLI arguments: {:?}", cli);
 
-    let file = File::open(&cli.config)?;
+    let file = File::open(&cli.config).wrap_err_with(|| format!("Failed to open config file: {}", cli.config.red()))?;
     debug!("Opened config file: {}", cli.config);
     let mut reader = BufReader::new(file);
-    let manifest_spec: ManifestSpec = config::load_manifest_spec(&mut reader)?;
+    let manifest_spec: ManifestSpec = config::load_manifest_spec(&mut reader).wrap_err("Failed to load manifest spec")?;
     debug!("Loaded manifest spec: {:?}", manifest_spec);
 
     let complete = !cli.any_section_specified();
     debug!("Complete mode = {}", complete);
 
-    let pkgmgr = get_pkgmgr()?;
+    let pkgmgr = get_pkgmgr().wrap_err("Failed to determine package manager")?;
     debug!("Determined pkgmgr: {}", pkgmgr);
 
     let mut sections: Vec<ManifestType> = Vec::new();
