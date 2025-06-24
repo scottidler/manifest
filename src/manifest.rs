@@ -206,14 +206,12 @@ fn render_script(map: &HashMap<String, String>) -> String {
         return "".to_string();
     }
     let mut out = String::new();
-    out.push_str("\necho \"scripts:\"\n");
+    out.push_str("echo \"scripts:\"\n");
     let scripts: Vec<_> = map.iter().collect();
     for (i, (name, body)) in scripts.iter().enumerate() {
         out.push_str(&format!("echo \"{}:\"\n", name));
         out.push_str(body);
-        out.push('\n');
-
-        // Add blank line between scripts for readability, but not after the last one
+        // Ensure only one blank line between scripts
         if i < scripts.len() - 1 {
             out.push('\n');
         }
