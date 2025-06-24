@@ -6,7 +6,8 @@ use clap::{ArgAction, Parser};
 #[command(
     name = "manifest",
     version = env!("GIT_DESCRIBE"),
-    about = "Generate a Bash script from a YAML manifest describing your config."
+    about = "Generate a Bash script from a YAML manifest describing your config.",
+    after_help = "If the config file is missing, ensure it is present in the specified path or use the --config option to specify a different path."
 )]
 pub struct Cli {
     #[arg(

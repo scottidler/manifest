@@ -21,6 +21,7 @@ use std::process::Command;
 use walkdir::WalkDir;
 use chrono::Local;
 use colored::*;
+use clap::CommandFactory;
 
 fn check_hash(program: &str) -> bool {
     debug!("check_hash: checking for program {}", program);
@@ -184,7 +185,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     debug!("Parsed CLI arguments: {:?}", cli);
 
-    let file = File::open(&cli.config).wrap_err_with(|| format!("Failed to open config file: {}", cli.config.red()))?;
+    let file = match File::open(&cli.config) {
+        Ok(f) => f,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Cli::command().print_help().unwrap();
+                println!("");
+            }
+            return Err(e).wrap_err_with(|| format!("Failed to open config file: {}", cli.config.red()));
+        }
+    };
     debug!("Opened config file: {}", cli.config);
     let mut reader = BufReader::new(file);
     let manifest_spec: ManifestSpec = config::load_manifest_spec(&mut reader).wrap_err("Failed to load manifest spec")?;
