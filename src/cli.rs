@@ -5,7 +5,7 @@ use clap::{ArgAction, Parser};
 #[derive(Debug, Parser)]
 #[command(
     name = "manifest",
-    version,
+    version = env!("GIT_DESCRIBE"),
     about = "Generate a Bash script from a YAML manifest describing your config."
 )]
 pub struct Cli {
