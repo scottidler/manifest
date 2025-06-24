@@ -104,8 +104,8 @@ EOM
 ", block = block, items = items)
     } else {
         format!(
-r#"{header}
-
+r#"
+{header}
 while read -r file link; do
     {block}
 done<<EOM
@@ -122,8 +122,8 @@ EOM
 fn render_continue(header: &str, block: &str, items: &[String]) -> String {
     let items = items.join(" \\\n    ");
     format!(
-r#"{header}
-
+r#"
+{header}
 {block} {items}
 "#,
         header = header,
@@ -146,7 +146,6 @@ fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
     let mut out = String::new();
     out.push_str("echo \"links:\"\n");
     out.push_str(&render_heredoc("", "linker $file $link", &link_lines));
-    out.push('\n');
     out
 }
 
@@ -166,15 +165,15 @@ fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
             install_dir
         ));
     }
-    out.push('\n');
     out
 }
 
 fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
-    out.push_str("echo \"github repos:\"\n\n");
+    out.push_str("\necho \"github repos:\"\n");
 
-    for (repo_name, repo_spec) in map {
+    let repos: Vec<_> = map.iter().collect();
+    for (i, (repo_name, repo_spec)) in repos.iter().enumerate() {
         let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
 
         out.push_str(&format!("echo \"{}:\"\n", repo_name));
@@ -192,9 +191,11 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
         out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
 
         out.push_str(&render_script(&repo_spec.script.items));
-        out.push('\n');
 
-        out.push('\n');
+        // Add blank line between repos for readability, but not after the last one
+        if i < repos.len() - 1 {
+            out.push('\n');
+        }
     }
 
     out
@@ -205,11 +206,17 @@ fn render_script(map: &HashMap<String, String>) -> String {
         return "".to_string();
     }
     let mut out = String::new();
-    out.push_str("echo \"scripts:\"\n\n");
-    for (name, body) in map {
+    out.push_str("\necho \"scripts:\"\n");
+    let scripts: Vec<_> = map.iter().collect();
+    for (i, (name, body)) in scripts.iter().enumerate() {
         out.push_str(&format!("echo \"{}:\"\n", name));
         out.push_str(body);
         out.push('\n');
+
+        // Add blank line between scripts for readability, but not after the last one
+        if i < scripts.len() - 1 {
+            out.push('\n');
+        }
     }
     out
 }
@@ -236,11 +243,14 @@ pub fn build_script(sections: &[ManifestType]) -> String {
         script.push_str("\n\n");
     }
 
-    for sec in sections {
-        let body = sec.render();
+    for (i, sec) in sections.iter().enumerate() {
+        let mut body = sec.render();
         if !body.trim().is_empty() {
+            // Remove leading newline from the first section
+            if i == 0 && body.starts_with('\n') {
+                body = body[1..].to_string();
+            }
             script.push_str(&body);
-            script.push('\n');
         }
     }
     script
