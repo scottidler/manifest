@@ -237,8 +237,8 @@ pub fn build_script(sections: &[ManifestType]) -> String {
         }
     }
     if !blocks.is_empty() {
-        script.push_str(&blocks.join("\n\n"));
-        script.push_str("\n\n");
+        script.push_str(&blocks.join("\n"));
+        script.push_str("\n");
     }
 
     for (i, sec) in sections.iter().enumerate() {
