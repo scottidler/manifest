@@ -255,3 +255,424 @@ pub fn build_script(sections: &[ManifestType]) -> String {
     }
     script
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_manifest_type_link_render() {
+        let items = vec![
+            "src1 dst1".to_string(),
+            "src2 dst2".to_string(),
+        ];
+        let manifest_type = ManifestType::Link(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"links:\""));
+        assert!(rendered.contains("while read -r file link; do"));
+        assert!(rendered.contains("linker $file $link"));
+        assert!(rendered.contains("src1 dst1"));
+        assert!(rendered.contains("src2 dst2"));
+        assert!(rendered.contains("done<<EOM"));
+    }
+
+    #[test]
+    fn test_manifest_type_ppa_render() {
+        let items = vec![
+            "git-core/ppa".to_string(),
+            "mkusb/ppa".to_string(),
+        ];
+        let manifest_type = ManifestType::Ppa(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"ppas:\""));
+        assert!(rendered.contains("while read -r file link; do"));
+        assert!(rendered.contains("ppas=$(somecheck)"));
+        assert!(rendered.contains("if [[ $ppas != *\"$pkg\"* ]]; then"));
+        assert!(rendered.contains("sudo add-apt-repository -y \"ppa:$pkg\""));
+        assert!(rendered.contains("git-core/ppa"));
+        assert!(rendered.contains("mkusb/ppa"));
+    }
+
+    #[test]
+    fn test_manifest_type_apt_render() {
+        let items = vec![
+            "fuse3".to_string(),
+            "ldap-utils".to_string(),
+            "fonts-powerline".to_string(),
+        ];
+        let manifest_type = ManifestType::Apt(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"apts:\""));
+        assert!(rendered.contains("sudo apt update && sudo apt upgrade -y"));
+        assert!(rendered.contains("sudo apt install -y software-properties-common"));
+        assert!(rendered.contains("sudo apt install -y fuse3 \\"));
+        assert!(rendered.contains("ldap-utils \\"));
+        assert!(rendered.contains("fonts-powerline"));
+    }
+
+    #[test]
+    fn test_manifest_type_dnf_render() {
+        let items = vec![
+            "the_silver_searcher".to_string(),
+            "gcc".to_string(),
+        ];
+        let manifest_type = ManifestType::Dnf(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"dnf packages:\""));
+        assert!(rendered.contains("sudo dnf install -y the_silver_searcher \\"));
+        assert!(rendered.contains("gcc"));
+    }
+
+    #[test]
+    fn test_manifest_type_npm_render() {
+        let items = vec![
+            "diff-so-fancy".to_string(),
+            "wt-cli".to_string(),
+        ];
+        let manifest_type = ManifestType::Npm(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"npm packages:\""));
+        assert!(rendered.contains("sudo npm install -g diff-so-fancy \\"));
+        assert!(rendered.contains("wt-cli"));
+    }
+
+    #[test]
+    fn test_manifest_type_pip3_render() {
+        let items = vec![
+            "argh".to_string(),
+            "numpy".to_string(),
+            "twine".to_string(),
+        ];
+        let manifest_type = ManifestType::Pip3(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"pip3 packages:\""));
+        assert!(rendered.contains("sudo apt-get install -y python3-dev"));
+        assert!(rendered.contains("sudo -H pip3 install --upgrade pip setuptools"));
+        assert!(rendered.contains("sudo -H pip3 install --upgrade argh \\"));
+        assert!(rendered.contains("numpy \\"));
+        assert!(rendered.contains("twine"));
+    }
+
+    #[test]
+    fn test_manifest_type_pipx_render() {
+        let items = vec![
+            "doit".to_string(),
+            "mypy".to_string(),
+        ];
+        let manifest_type = ManifestType::Pipx(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"pipx:\""));
+        assert!(rendered.contains("while read -r file link; do"));
+        assert!(rendered.contains("pipx install \"$pkg\""));
+        assert!(rendered.contains("doit"));
+        assert!(rendered.contains("mypy"));
+    }
+
+    #[test]
+    fn test_manifest_type_flatpak_render() {
+        let items = vec![
+            "org.gnome.GTG".to_string(),
+            "org.gnome.BreakTimer".to_string(),
+        ];
+        let manifest_type = ManifestType::Flatpak(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"flatpaks:\""));
+        assert!(rendered.contains("flatpak install --assumeyes --or-update org.gnome.GTG \\"));
+        assert!(rendered.contains("org.gnome.BreakTimer"));
+    }
+
+    #[test]
+    fn test_manifest_type_cargo_render() {
+        let items = vec![
+            "bat".to_string(),
+            "cargo-expand".to_string(),
+        ];
+        let manifest_type = ManifestType::Cargo(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"cargo crates:\""));
+        assert!(rendered.contains("cargo install bat \\"));
+        assert!(rendered.contains("cargo-expand"));
+    }
+
+    #[test]
+    fn test_manifest_type_script_render() {
+        let mut items = HashMap::new();
+        items.insert("rust".to_string(), "curl https://sh.rustup.rs -sSf | sh".to_string());
+        items.insert("docker".to_string(), "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -\nsudo add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable\"".to_string());
+
+        let manifest_type = ManifestType::Script(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"scripts:\""));
+        assert!(rendered.contains("echo \"rust:\"") || rendered.contains("echo \"docker:\""));
+        assert!(rendered.contains("curl https://sh.rustup.rs -sSf | sh"));
+        assert!(rendered.contains("curl -fsSL https://download.docker.com/linux/ubuntu/gpg"));
+    }
+
+    #[test]
+    fn test_manifest_type_github_render() {
+        let mut items = HashMap::new();
+        let mut repo_spec = crate::config::RepoSpec::default();
+        repo_spec.cargo = vec!["./".to_string()];
+        repo_spec.link.items.insert("bin/test".to_string(), "~/bin/test".to_string());
+        repo_spec.script.items.insert("setup".to_string(), "echo 'Setting up test repo'".to_string());
+        items.insert("scottidler/test".to_string(), repo_spec);
+
+        let manifest_type = ManifestType::Github(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"github repos:\""));
+        assert!(rendered.contains("echo \"scottidler/test:\""));
+        assert!(rendered.contains("git clone --recursive https://github.com/scottidler/test"));
+        assert!(rendered.contains("cargo install --path"));
+        assert!(rendered.contains("linker"));
+        assert!(rendered.contains("echo \"setup:\""));
+        assert!(rendered.contains("Setting up test repo"));
+    }
+
+    #[test]
+    fn test_manifest_type_functions() {
+        // Test that Link returns LINKER function
+        let link_type = ManifestType::Link(vec![]);
+        assert_eq!(link_type.functions(), LINKER);
+
+        // Test that Github returns LINKER function
+        let github_type = ManifestType::Github(HashMap::new());
+        assert_eq!(github_type.functions(), LINKER);
+
+        // Test that Script returns LATEST function
+        let script_type = ManifestType::Script(HashMap::new());
+        assert_eq!(script_type.functions(), LATEST);
+
+        // Test that other types return empty string
+        let apt_type = ManifestType::Apt(vec![]);
+        assert_eq!(apt_type.functions(), "");
+
+        let cargo_type = ManifestType::Cargo(vec![]);
+        assert_eq!(cargo_type.functions(), "");
+    }
+
+    #[test]
+    fn test_render_heredoc() {
+        let header = "echo \"test:\"";
+        let block = "echo $file $link";
+        let items = vec!["item1 value1".to_string(), "item2 value2".to_string()];
+
+        let result = render_heredoc(header, block, &items);
+
+        assert!(result.contains("echo \"test:\""));
+        assert!(result.contains("while read -r file link; do"));
+        assert!(result.contains("echo $file $link"));
+        assert!(result.contains("done<<EOM"));
+        assert!(result.contains("item1 value1"));
+        assert!(result.contains("item2 value2"));
+        assert!(result.contains("EOM"));
+    }
+
+    #[test]
+    fn test_render_heredoc_empty_header() {
+        let header = "";
+        let block = "echo $file $link";
+        let items = vec!["item1 value1".to_string()];
+
+        let result = render_heredoc(header, block, &items);
+
+        assert!(!result.contains("echo \"test:\""));
+        assert!(result.contains("while read -r file link; do"));
+        assert!(result.contains("echo $file $link"));
+        assert!(result.contains("item1 value1"));
+    }
+
+    #[test]
+    fn test_render_continue() {
+        let header = "echo \"packages:\"";
+        let block = "sudo apt install -y";
+        let items = vec!["package1".to_string(), "package2".to_string(), "package3".to_string()];
+
+        let result = render_continue(header, block, &items);
+
+        assert!(result.contains("echo \"packages:\""));
+        assert!(result.contains("sudo apt install -y package1 \\"));
+        assert!(result.contains("package2 \\"));
+        assert!(result.contains("package3"));
+        assert!(!result.contains("package3 \\"));
+    }
+
+    #[test]
+    fn test_render_repo_links() {
+        let mut link_spec = crate::config::LinkSpec::default();
+        link_spec.items.insert("bin/tool".to_string(), "~/bin/tool".to_string());
+        link_spec.items.insert("config/tool.conf".to_string(), "~/.config/tool.conf".to_string());
+
+        let result = render_repo_links("$HOME/repos/test", &link_spec);
+
+        assert!(result.contains("echo \"links:\""));
+        assert!(result.contains("$HOME/repos/test/bin/tool ~/bin/tool"));
+        assert!(result.contains("$HOME/repos/test/config/tool.conf ~/.config/tool.conf"));
+        assert!(result.contains("linker $file $link"));
+    }
+
+    #[test]
+    fn test_render_repo_links_empty() {
+        let link_spec = crate::config::LinkSpec::default();
+        let result = render_repo_links("$HOME/repos/test", &link_spec);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_render_repo_cargo_install() {
+        let paths = vec!["./".to_string(), "subdir".to_string()];
+        let result = render_repo_cargo_install("$HOME/repos/test", &paths);
+
+        assert!(result.contains("echo \"cargo install (path):\""));
+        assert!(result.contains("echo \"Installing from $HOME/repos/test/./\""));
+        assert!(result.contains("(cd $HOME/repos/test/./ && cargo install --path .)"));
+        assert!(result.contains("echo \"Installing from $HOME/repos/test/subdir\""));
+        assert!(result.contains("(cd $HOME/repos/test/subdir && cargo install --path .)"));
+    }
+
+    #[test]
+    fn test_render_repo_cargo_install_empty() {
+        let paths = vec![];
+        let result = render_repo_cargo_install("$HOME/repos/test", &paths);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_render_github() {
+        let mut items = HashMap::new();
+        let mut repo_spec1 = crate::config::RepoSpec::default();
+        repo_spec1.cargo = vec!["./".to_string()];
+        repo_spec1.link.items.insert("bin/tool1".to_string(), "~/bin/tool1".to_string());
+        repo_spec1.script.items.insert("setup".to_string(), "echo 'Setting up tool1'".to_string());
+
+        let mut repo_spec2 = crate::config::RepoSpec::default();
+        repo_spec2.cargo = vec!["subdir".to_string()];
+        repo_spec2.link.items.insert("bin/tool2".to_string(), "~/bin/tool2".to_string());
+
+        items.insert("user/repo1".to_string(), repo_spec1);
+        items.insert("user/repo2".to_string(), repo_spec2);
+
+        let result = render_github(&items, "repos");
+
+        assert!(result.contains("echo \"github repos:\""));
+        assert!(result.contains("echo \"user/repo1:\"") || result.contains("echo \"user/repo2:\""));
+        assert!(result.contains("git clone --recursive https://github.com/user/repo1"));
+        assert!(result.contains("git clone --recursive https://github.com/user/repo2"));
+        assert!(result.contains("cargo install --path"));
+        assert!(result.contains("linker"));
+        assert!(result.contains("Setting up tool1"));
+    }
+
+    #[test]
+    fn test_render_script() {
+        let mut items = HashMap::new();
+        items.insert("script1".to_string(), "echo 'Running script1'\necho 'Done'".to_string());
+        items.insert("script2".to_string(), "echo 'Running script2'".to_string());
+
+        let result = render_script(&items);
+
+        assert!(result.contains("echo \"scripts:\""));
+        assert!(result.contains("echo \"script1:\"") || result.contains("echo \"script2:\""));
+        assert!(result.contains("Running script1") || result.contains("Running script2"));
+    }
+
+    #[test]
+    fn test_render_script_empty() {
+        let items = HashMap::new();
+        let result = render_script(&items);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_script_empty() {
+        let sections = vec![];
+        let result = build_script(&sections);
+
+        assert!(result.contains("#!/bin/bash"));
+        assert!(result.contains("# generated file by manifest"));
+        assert!(result.contains("# src: https://github.com/scottidler/manifest"));
+        assert!(result.contains("if [ -n \"$DEBUG\" ]; then"));
+        assert!(result.contains("PS4=':${LINENO}+'"));
+        assert!(result.contains("set -x"));
+        assert!(result.contains("fi"));
+    }
+
+    #[test]
+    fn test_build_script_with_functions() {
+        let sections = vec![
+            ManifestType::Link(vec!["src dst".to_string()]),
+            ManifestType::Script(HashMap::from([("test".to_string(), "echo test".to_string())])),
+        ];
+        let result = build_script(&sections);
+
+        assert!(result.contains("#!/bin/bash"));
+        assert!(result.contains("# generated file by manifest"));
+
+        // Should contain both LINKER and LATEST functions
+        assert!(result.contains("linker() {"));
+        assert!(result.contains("latest() {"));
+
+        // Should contain the rendered sections
+        assert!(result.contains("echo \"links:\""));
+        assert!(result.contains("echo \"scripts:\""));
+    }
+
+    #[test]
+    fn test_build_script_deduplicates_functions() {
+        let sections = vec![
+            ManifestType::Link(vec!["src1 dst1".to_string()]),
+            ManifestType::Github(HashMap::new()),
+            ManifestType::Link(vec!["src2 dst2".to_string()]),
+        ];
+        let result = build_script(&sections);
+
+        // Should only contain LINKER function once, even though both Link and Github use it
+        let linker_count = result.matches("linker() {").count();
+        assert_eq!(linker_count, 1);
+    }
+
+    #[test]
+    fn test_build_script_removes_leading_newline_from_first_section() {
+        let sections = vec![
+            ManifestType::Apt(vec!["package1".to_string()]),
+        ];
+        let result = build_script(&sections);
+
+        // The first section should not have a leading newline after the header
+        let lines: Vec<&str> = result.lines().collect();
+        let debug_end_idx = lines.iter().position(|&line| line == "fi").unwrap();
+
+        // The line after "fi" should be the first line of the apt section
+        assert!(lines[debug_end_idx + 2].contains("echo \"apts:\""));
+    }
+
+    #[test]
+    fn test_integration_with_repo_nested_scripts() {
+        // Test that nested scripts in RepoSpec work correctly
+        let mut repo_spec = crate::config::RepoSpec::default();
+        repo_spec.script.items.insert("post_install".to_string(), "echo 'Post install script'\nchmod +x ~/bin/tool".to_string());
+        repo_spec.script.items.insert("configure".to_string(), "echo 'Configuration script'\n~/bin/tool --setup".to_string());
+
+        let mut github_items = HashMap::new();
+        github_items.insert("user/repo".to_string(), repo_spec);
+
+        let github_type = ManifestType::Github(github_items);
+        let rendered = github_type.render();
+
+        assert!(rendered.contains("echo \"scripts:\""));
+        assert!(rendered.contains("echo \"post_install:\"") || rendered.contains("echo \"configure:\""));
+        assert!(rendered.contains("Post install script") || rendered.contains("Configuration script"));
+        assert!(rendered.contains("chmod +x ~/bin/tool") || rendered.contains("~/bin/tool --setup"));
+    }
+}

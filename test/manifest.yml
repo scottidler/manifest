@@ -1,0 +1,163 @@
+verbose: true
+allow_errors: false
+
+link:
+  recursive: true
+  HOME: $HOME
+  "test/file": "~/test/file"
+
+ppa:
+  items:
+    - git-core/ppa
+    - mkusb/ppa
+    - graphics-drivers/ppa
+
+pkg:
+  items:
+    - jq
+    - vim
+    - htop
+    - tree
+    - curl
+
+apt:
+  items:
+    - fuse3
+    - ldap-utils
+    - fonts-powerline
+    - build-essential
+    - python3-dev
+
+dnf:
+  items:
+    - the_silver_searcher
+    - gcc
+    - libffi-devel
+    - openssl-devel
+
+npm:
+  items:
+    - diff-so-fancy
+    - wt-cli
+    - auth0-deploy-cli
+
+pip3:
+  items:
+    - argh
+    - numpy
+    - twine
+    - requests
+  distutils:
+    - Cython
+    - pexpect
+    - pyasn1-modules
+
+pipx:
+  items:
+    - doit
+    - mypy
+    - awscli
+    - pipenv
+
+flatpak:
+  items:
+    - org.gnome.GTG
+    - org.gnome.BreakTimer
+    - com.github.hugolabe.Wike
+
+cargo:
+  items:
+    - bat
+    - cargo-expand
+    - du-dust
+    - ripgrep
+    - fd-find
+
+github:
+  repopath: test_repos
+  "testuser/tool-with-scripts":
+    cargo:
+      - ./
+      - cli-tool
+    link:
+      "bin/tool": "~/bin/tool"
+      "config/tool.conf": "~/.config/tool/tool.conf"
+      "scripts/helper.sh": "~/bin/helper.sh"
+    script:
+      post_install: |
+        echo "Running post-install script for tool-with-scripts"
+        chmod +x ~/bin/tool
+        chmod +x ~/bin/helper.sh
+        echo "Creating config directory"
+        mkdir -p ~/.config/tool
+      configure: |
+        echo "Configuring tool-with-scripts"
+        ~/bin/tool --init
+        echo "Setting up shell integration"
+        echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+      test: |
+        echo "Testing tool installation"
+        ~/bin/tool --version
+        ~/bin/helper.sh --check
+  "testuser/simple-repo":
+    cargo:
+      - ./
+    link:
+      "bin/simple": "~/bin/simple"
+  "testuser/complex-repo":
+    cargo:
+      - main-tool
+      - sub-tool
+      - utils
+    link:
+      recursive: true
+      "configs/": "~/.config/complex/"
+      "bin/main": "~/bin/main"
+      "bin/sub": "~/bin/sub"
+    script:
+      setup: |
+        echo "Setting up complex repo"
+        mkdir -p ~/.config/complex
+        mkdir -p ~/.local/share/complex
+      build: |
+        echo "Building all components"
+        cd main-tool && cargo build --release
+        cd ../sub-tool && cargo build --release
+        cd ../utils && cargo build --release
+      post_build: |
+        echo "Post-build configuration"
+        cp target/release/main ~/bin/
+        cp target/release/sub ~/bin/
+        cp target/release/utils ~/bin/
+        echo "Build completed successfully"
+
+script:
+  rust: |
+    echo "Installing Rust toolchain"
+    curl https://sh.rustup.rs -sSf | sh
+    source ~/.cargo/env
+    rustup component add clippy rustfmt
+  docker: |
+    echo "Installing Docker"
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+    sudo apt-get update
+    sudo apt-get install -y docker-ce
+    sudo usermod -aG docker $USER
+  nodejs: |
+    echo "Installing Node.js via NodeSource"
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+    echo "Node.js version: $(node --version)"
+    echo "npm version: $(npm --version)"
+  development_tools: |
+    echo "Installing development tools"
+    sudo apt-get update
+    sudo apt-get install -y \
+      git \
+      build-essential \
+      cmake \
+      pkg-config \
+      libssl-dev \
+      libsqlite3-dev
+    echo "Development tools installed" 
