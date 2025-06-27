@@ -14,7 +14,8 @@ pub enum ManifestType {
     Pipx(Vec<String>),
     Flatpak(Vec<String>),
     Cargo(Vec<String>),
-    Github(HashMap<String, RepoSpec>),
+    Github(HashMap<String, RepoSpec>, String),
+    GitCrypt(HashMap<String, RepoSpec>, String),
     Script(HashMap<String, String>),
 }
 
@@ -25,7 +26,8 @@ impl ManifestType {
     pub fn functions(&self) -> String {
         match self {
             ManifestType::Link(_) => LINKER.to_string(),
-            ManifestType::Github(_) => LINKER.to_string(),
+            ManifestType::Github(_, _) => LINKER.to_string(),
+            ManifestType::GitCrypt(_, _) => LINKER.to_string(),
             ManifestType::Script(_) => LATEST.to_string(),
             _ => "".to_string(),
         }
@@ -84,8 +86,11 @@ sudo -H pip3 install --upgrade pip setuptools"#;
                 let block  = r#"cargo install"#;
                 render_continue(header, block, items)
             }
-            ManifestType::Github(map) => {
-                render_github(map, "repos")
+            ManifestType::Github(map, repopath) => {
+                render_github(map, repopath)
+            }
+            ManifestType::GitCrypt(map, repopath) => {
+                render_gitcrypt(map, repopath)
             }
             ManifestType::Script(map) => render_script(map),
         }
@@ -149,7 +154,6 @@ fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
     out
 }
 
-/// Render per-repo `cargo install --path` section.
 fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return String::new();
@@ -201,6 +205,62 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     out
 }
 
+fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
+    let mut out = String::new();
+    out.push_str("\necho \"git-crypt repos:\"\n");
+
+    // Check for git-crypt binary
+    out.push_str("if ! hash git-crypt >/dev/null 2>&1; then\n");
+    out.push_str("  echo \"Error: git-crypt not found. Install with: apt install git-crypt\"\n");
+    out.push_str("  exit 1\n");
+    out.push_str("fi\n\n");
+
+    // Check for environment variable
+    out.push_str("if [[ -z \"${GIT_CRYPT_PASSWORD}\" ]]; then\n");
+    out.push_str("  echo \"Error: GIT_CRYPT_PASSWORD environment variable not set\"\n");
+    out.push_str("  echo \"Set it with: export GIT_CRYPT_PASSWORD='your-passphrase'\"\n");
+    out.push_str("  exit 1\n");
+    out.push_str("fi\n\n");
+
+    let repos: Vec<_> = map.iter().collect();
+    for (i, (repo_name, repo_spec)) in repos.iter().enumerate() {
+        let repo_path = format!("$HOME/{}/{}", repopath, repo_name);
+
+        out.push_str(&format!("echo \"{}:\"\n", repo_name));
+        out.push_str(&format!(
+            "git clone --recursive https://github.com/{} {} \n",
+            repo_name, repo_path
+        ));
+        out.push_str(&format!(
+            "(cd {} && pwd && git pull && git checkout HEAD)\n",
+            repo_path
+        ));
+
+        // git-crypt unlock step
+        out.push_str(&format!(
+            "if ! (cd {} && echo \"$GIT_CRYPT_PASSWORD\" | git-crypt unlock -); then\n",
+            repo_path
+        ));
+        out.push_str(&format!(
+            "  echo \"Error: Failed to unlock git-crypt repo {}\"\n",
+            repo_name
+        ));
+        out.push_str("  exit 1\n");
+        out.push_str("fi\n");
+
+        out.push_str(&render_repo_cargo_install(&repo_path, &repo_spec.cargo));
+        out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
+        out.push_str(&render_script(&repo_spec.script.items));
+
+        // Add blank line between repos for readability, but not after the last one
+        if i < repos.len() - 1 {
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 fn render_script(map: &HashMap<String, String>) -> String {
     if map.is_empty() {
         return "".to_string();
@@ -211,7 +271,6 @@ fn render_script(map: &HashMap<String, String>) -> String {
     for (i, (name, body)) in scripts.iter().enumerate() {
         out.push_str(&format!("echo \"{}:\"\n", name));
         out.push_str(body);
-        // Ensure only one blank line between scripts
         if i < scripts.len() - 1 {
             out.push('\n');
         }
@@ -244,7 +303,6 @@ pub fn build_script(sections: &[ManifestType]) -> String {
     for (i, sec) in sections.iter().enumerate() {
         let mut body = sec.render();
         if !body.trim().is_empty() {
-            // Remove leading newline from the first section
             if i == 0 && body.starts_with('\n') {
                 body = body[1..].to_string();
             }
@@ -426,7 +484,7 @@ mod tests {
         repo_spec.script.items.insert("setup".to_string(), "echo 'Setting up test repo'".to_string());
         items.insert("scottidler/test".to_string(), repo_spec);
 
-        let manifest_type = ManifestType::Github(items);
+        let manifest_type = ManifestType::Github(items, "repos".to_string());
         let rendered = manifest_type.render();
 
         assert!(rendered.contains("echo \"github repos:\""));
@@ -439,20 +497,46 @@ mod tests {
     }
 
     #[test]
+    fn test_manifest_type_git_crypt_render() {
+        let mut items = HashMap::new();
+        let mut repo_spec = crate::config::RepoSpec::default();
+        repo_spec.link.items.insert("ssh/id_rsa".to_string(), "~/.ssh/id_rsa".to_string());
+        repo_spec.link.items.insert("gpg/private.asc".to_string(), "~/.gnupg/private.asc".to_string());
+        repo_spec.script.items.insert("post_unlock".to_string(), "chmod 600 ~/.ssh/id_rsa\ngpg --import ~/.gnupg/private.asc".to_string());
+        items.insert("scottidler/secrets".to_string(), repo_spec);
+
+        let manifest_type = ManifestType::GitCrypt(items, "repos".to_string());
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"git-crypt repos:\""));
+        assert!(rendered.contains("if ! hash git-crypt >/dev/null 2>&1; then"));
+        assert!(rendered.contains("Error: git-crypt not found"));
+        assert!(rendered.contains("if [[ -z \"${GIT_CRYPT_PASSWORD}\" ]]; then"));
+        assert!(rendered.contains("Error: GIT_CRYPT_PASSWORD environment variable not set"));
+        assert!(rendered.contains("echo \"scottidler/secrets:\""));
+        assert!(rendered.contains("git clone --recursive https://github.com/scottidler/secrets"));
+        assert!(rendered.contains("echo \"$GIT_CRYPT_PASSWORD\" | git-crypt unlock -"));
+        assert!(rendered.contains("linker"));
+        assert!(rendered.contains("~/.ssh/id_rsa"));
+        assert!(rendered.contains("~/.gnupg/private.asc"));
+        assert!(rendered.contains("chmod 600 ~/.ssh/id_rsa"));
+        assert!(rendered.contains("gpg --import ~/.gnupg/private.asc"));
+    }
+
+    #[test]
     fn test_manifest_type_functions() {
-        // Test that Link returns LINKER function
         let link_type = ManifestType::Link(vec![]);
         assert_eq!(link_type.functions(), LINKER);
 
-        // Test that Github returns LINKER function
-        let github_type = ManifestType::Github(HashMap::new());
+        let github_type = ManifestType::Github(HashMap::new(), "repos".to_string());
         assert_eq!(github_type.functions(), LINKER);
 
-        // Test that Script returns LATEST function
+        let gitcrypt_type = ManifestType::GitCrypt(HashMap::new(), "repos".to_string());
+        assert_eq!(gitcrypt_type.functions(), LINKER);
+
         let script_type = ManifestType::Script(HashMap::new());
         assert_eq!(script_type.functions(), LATEST);
 
-        // Test that other types return empty string
         let apt_type = ManifestType::Apt(vec![]);
         assert_eq!(apt_type.functions(), "");
 
@@ -617,11 +701,9 @@ mod tests {
         assert!(result.contains("#!/bin/bash"));
         assert!(result.contains("# generated file by manifest"));
 
-        // Should contain both LINKER and LATEST functions
         assert!(result.contains("linker() {"));
         assert!(result.contains("latest() {"));
 
-        // Should contain the rendered sections
         assert!(result.contains("echo \"links:\""));
         assert!(result.contains("echo \"scripts:\""));
     }
@@ -630,12 +712,11 @@ mod tests {
     fn test_build_script_deduplicates_functions() {
         let sections = vec![
             ManifestType::Link(vec!["src1 dst1".to_string()]),
-            ManifestType::Github(HashMap::new()),
+            ManifestType::Github(HashMap::new(), "repos".to_string()),
             ManifestType::Link(vec!["src2 dst2".to_string()]),
         ];
         let result = build_script(&sections);
 
-        // Should only contain LINKER function once, even though both Link and Github use it
         let linker_count = result.matches("linker() {").count();
         assert_eq!(linker_count, 1);
     }
@@ -647,17 +728,14 @@ mod tests {
         ];
         let result = build_script(&sections);
 
-        // The first section should not have a leading newline after the header
         let lines: Vec<&str> = result.lines().collect();
         let debug_end_idx = lines.iter().position(|&line| line == "fi").unwrap();
 
-        // The line after "fi" should be the first line of the apt section
         assert!(lines[debug_end_idx + 2].contains("echo \"apts:\""));
     }
 
     #[test]
     fn test_integration_with_repo_nested_scripts() {
-        // Test that nested scripts in RepoSpec work correctly
         let mut repo_spec = crate::config::RepoSpec::default();
         repo_spec.script.items.insert("post_install".to_string(), "echo 'Post install script'\nchmod +x ~/bin/tool".to_string());
         repo_spec.script.items.insert("configure".to_string(), "echo 'Configuration script'\n~/bin/tool --setup".to_string());
@@ -665,7 +743,7 @@ mod tests {
         let mut github_items = HashMap::new();
         github_items.insert("user/repo".to_string(), repo_spec);
 
-        let github_type = ManifestType::Github(github_items);
+        let github_type = ManifestType::Github(github_items, "repos".to_string());
         let rendered = github_type.render();
 
         assert!(rendered.contains("echo \"scripts:\""));

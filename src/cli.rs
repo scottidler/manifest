@@ -135,6 +135,17 @@ pub struct Cli {
     pub github: Vec<String>,
 
     #[arg(
+        short = 'G',
+        long = "git-crypt",
+        num_args = 0..,
+        default_missing_value = "*",
+        action = ArgAction::Append,
+        value_name = "GITHUB",
+        help = "Specify list of glob patterns to match git-crypt repos"
+    )]
+    pub git_crypt: Vec<String>,
+
+    #[arg(
         short = 's',
         long = "script",
         num_args = 0..,
@@ -164,6 +175,7 @@ impl Cli {
             || !self.flatpak.is_empty()
             || !self.cargo.is_empty()
             || !self.github.is_empty()
+            || !self.git_crypt.is_empty()
             || !self.script.is_empty()
     }
 }

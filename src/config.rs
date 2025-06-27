@@ -6,6 +6,11 @@ use serde_yaml::from_reader;
 use std::collections::HashMap;
 use std::io::Read;
 
+pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
+    let parsed: ManifestSpec = from_reader(r)?;
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ManifestSpec {
     #[serde(default)]
@@ -35,6 +40,9 @@ pub struct ManifestSpec {
     pub cargo: CargoSpec,
     #[serde(default)]
     pub github: GithubSpec,
+    #[serde(default)]
+    #[serde(rename = "git-crypt")]
+    pub git_crypt: GitCryptSpec,
     #[serde(default)]
     pub script: ScriptSpec,
 }
@@ -110,17 +118,8 @@ pub struct ScriptSpec {
     pub items: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct GithubSpec {
-    #[serde(default = "default_repopath")]
-    pub repopath: String,
-    #[serde(default)]
-    #[serde(flatten)]
-    pub items: HashMap<String, RepoSpec>,
-}
-
 fn default_repopath() -> String {
-    "repos".to_string()
+  "repos".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -133,9 +132,22 @@ pub struct RepoSpec {
     pub script: ScriptSpec,
 }
 
-pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
-    let parsed: ManifestSpec = from_reader(r)?;
-    Ok(parsed)
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GithubSpec {
+    #[serde(default = "default_repopath")]
+    pub repopath: String,
+    #[serde(default)]
+    #[serde(flatten)]
+    pub items: HashMap<String, RepoSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GitCryptSpec {
+    #[serde(default = "default_repopath")]
+    pub repopath: String,
+    #[serde(default)]
+    #[serde(flatten)]
+    pub items: HashMap<String, RepoSpec>,
 }
 
 #[cfg(test)]
@@ -160,6 +172,7 @@ mod tests {
         assert!(spec.flatpak.items.is_empty());
         assert!(spec.cargo.items.is_empty());
         assert!(spec.github.items.is_empty());
+        assert!(spec.git_crypt.items.is_empty());
         assert!(spec.script.items.is_empty());
     }
 
@@ -383,6 +396,45 @@ repopath: custom_repos
     - ./
 "#;
         let spec: GithubSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.repopath, "repos"); // default value
+    }
+
+    #[test]
+    fn test_git_crypt_spec_deserialization() {
+        let yaml = r#"
+repopath: secrets
+"scottidler/personal-secrets":
+  link:
+    "ssh/id_rsa": "~/.ssh/id_rsa"
+    "ssh/id_rsa.pub": "~/.ssh/id_rsa.pub"
+    "gpg/private.asc": "~/.gnupg/private.asc"
+  script:
+    post_unlock: |
+      chmod 600 ~/.ssh/id_rsa
+      chmod 644 ~/.ssh/id_rsa.pub
+      gpg --import ~/.gnupg/private.asc
+"#;
+        let spec: GitCryptSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.repopath, "secrets");
+        assert_eq!(spec.items.len(), 1);
+
+        let repo_spec = spec.items.get("scottidler/personal-secrets").unwrap();
+        assert_eq!(repo_spec.link.items.len(), 3);
+        assert_eq!(repo_spec.link.items.get("ssh/id_rsa"), Some(&"~/.ssh/id_rsa".to_string()));
+        assert_eq!(repo_spec.link.items.get("ssh/id_rsa.pub"), Some(&"~/.ssh/id_rsa.pub".to_string()));
+        assert_eq!(repo_spec.link.items.get("gpg/private.asc"), Some(&"~/.gnupg/private.asc".to_string()));
+        assert_eq!(repo_spec.script.items.len(), 1);
+        assert!(repo_spec.script.items.get("post_unlock").unwrap().contains("chmod 600 ~/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn test_git_crypt_spec_default_repopath() {
+        let yaml = r#"
+"scottidler/secrets":
+  link:
+    "ssh/id_rsa": "~/.ssh/id_rsa"
+"#;
+        let spec: GitCryptSpec = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(spec.repopath, "repos"); // default value
     }
 

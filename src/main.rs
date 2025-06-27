@@ -293,7 +293,16 @@ fn main() -> Result<()> {
             fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
         if !github_items.is_empty() {
             debug!("Adding Github section with {} repos", github_items.len());
-            sections.push(ManifestType::Github(github_items));
+            sections.push(ManifestType::Github(github_items, manifest_spec.github.repopath.clone()));
+        }
+    }
+
+    if complete || !cli.git_crypt.is_empty() {
+        let gitcrypt_items: HashMap<String, RepoSpec> =
+            fuzzy(manifest_spec.git_crypt.items.clone()).include(&cli.git_crypt);
+        if !gitcrypt_items.is_empty() {
+            debug!("Adding GitCrypt section with {} repos", gitcrypt_items.len());
+            sections.push(ManifestType::GitCrypt(gitcrypt_items, manifest_spec.git_crypt.repopath.clone()));
         }
     }
 
