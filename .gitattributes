@@ -1,0 +1,7 @@
+# Encrypt all sensitive files
+HOME/.ssh/** filter=git-crypt diff=git-crypt
+HOME/.gnupg/** filter=git-crypt diff=git-crypt
+HOME/.api/** filter=git-crypt diff=git-crypt
+
+# Don't encrypt the README
+README.md !filter !diff 
