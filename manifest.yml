@@ -156,7 +156,9 @@ flatpak:
 cargo:
   items:
   - bat
+  - cargo-edit
   - cargo-expand
+  - cargo-release
   - cargo-show-asm
   - cargo-udeps
   - cargo-update
@@ -175,6 +177,7 @@ cargo:
   - sccache
   - sd
   - skim
+  - speedtest-rs
   - starship
   - tail
   - tealdeer
