@@ -144,7 +144,12 @@ fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
 
     let mut link_lines = Vec::new();
     for (src, dst) in &link_spec.items {
-        let full_src = format!("{}/{}", repo_path, src);
+        let path = std::path::Path::new(repo_path).join(src);
+        let full_src = path.components()
+            .filter(|c| *c != std::path::Component::CurDir)
+            .collect::<std::path::PathBuf>()
+            .to_string_lossy()
+            .to_string();
         link_lines.push(format!("{} {}", full_src, dst));
     }
 
