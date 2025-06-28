@@ -277,9 +277,6 @@ github:
   scottidler/repo:
     link:
       bin/repo: ~/bin/repo
-  scottidler/nvim:
-    link:
-      ./: ~/.config/nvim
   mozilla-it/cert-tools:
     link:
       findcert: ~/bin/findcert
