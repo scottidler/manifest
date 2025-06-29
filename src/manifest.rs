@@ -293,15 +293,26 @@ pub fn build_script(sections: &[ManifestType]) -> String {
     script.push_str("    set -x\n");
     script.push_str("fi\n\n");
 
-    let mut blocks = Vec::new();
+    // Determine which functions are needed and source them
+    let mut needs_linker = false;
+    let mut needs_latest = false;
+
     for sec in sections {
         let f = sec.functions();
-        if !f.trim().is_empty() && !blocks.contains(&f) {
-            blocks.push(f);
+        if f.contains("linker() {") {
+            needs_linker = true;
+        } else if f.contains("latest() {") {
+            needs_latest = true;
         }
     }
-    if !blocks.is_empty() {
-        script.push_str(&blocks.join("\n"));
+
+    if needs_linker {
+        script.push_str(". $HOME/.local/share/manifest/linker.sh\n");
+    }
+    if needs_latest {
+        script.push_str(". $HOME/.local/share/manifest/latest.sh\n");
+    }
+    if needs_linker || needs_latest {
         script.push_str("\n");
     }
 
@@ -706,8 +717,9 @@ mod tests {
         assert!(result.contains("#!/bin/bash"));
         assert!(result.contains("# generated file by manifest"));
 
-        assert!(result.contains("linker() {"));
-        assert!(result.contains("latest() {"));
+        // Should source functions instead of embedding them
+        assert!(result.contains(". $HOME/.local/share/manifest/linker.sh"));
+        assert!(result.contains(". $HOME/.local/share/manifest/latest.sh"));
 
         assert!(result.contains("echo \"links:\""));
         assert!(result.contains("echo \"scripts:\""));
@@ -722,8 +734,9 @@ mod tests {
         ];
         let result = build_script(&sections);
 
-        let linker_count = result.matches("linker() {").count();
-        assert_eq!(linker_count, 1);
+        // Should only source linker.sh once even though multiple sections need it
+        let linker_source_count = result.matches(". $HOME/.local/share/manifest/linker.sh").count();
+        assert_eq!(linker_source_count, 1);
     }
 
     #[test]
