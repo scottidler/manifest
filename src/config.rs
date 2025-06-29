@@ -396,7 +396,7 @@ repopath: custom_repos
     - ./
 "#;
         let spec: GithubSpec = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(spec.repopath, "repos"); // default value
+        assert_eq!(spec.repopath, "repos");
     }
 
     #[test]
@@ -435,7 +435,7 @@ repopath: secrets
     "ssh/id_rsa": "~/.ssh/id_rsa"
 "#;
         let spec: GitCryptSpec = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(spec.repopath, "repos"); // default value
+        assert_eq!(spec.repopath, "repos");
     }
 
     #[test]
@@ -573,16 +573,13 @@ script:
 
     #[test]
     fn test_load_manifest_spec_from_actual_file() {
-        // Test loading from the actual manifest.yml file
         let file = std::fs::File::open("manifest.yml").expect("manifest.yml should exist");
         let reader = std::io::BufReader::new(file);
         let spec = load_manifest_spec(reader).expect("Should parse manifest.yml successfully");
 
-        // Verify some key properties from the actual manifest
         assert!(spec.verbose);
         assert!(!spec.errors);
 
-        // Check that we have items in various sections
         assert!(!spec.ppa.items.is_empty());
         assert!(!spec.pkg.items.is_empty());
         assert!(!spec.apt.items.is_empty());
@@ -596,17 +593,14 @@ script:
         assert!(!spec.github.items.is_empty());
         assert!(!spec.script.items.is_empty());
 
-        // Check specific items we know should be there
         assert!(spec.pkg.items.contains(&"jq".to_string()));
         assert!(spec.pkg.items.contains(&"vim".to_string()));
         assert!(spec.cargo.items.contains(&"bat".to_string()));
         assert!(spec.cargo.items.contains(&"ripgrep".to_string()));
 
-        // Check that github repos are properly loaded
         assert!(spec.github.items.contains_key("scottidler/aka"));
         assert!(spec.github.items.contains_key("scottidler/nvim"));
 
-        // Check that scripts are loaded
         assert!(spec.script.items.contains_key("rust"));
         assert!(spec.script.items.contains_key("docker"));
     }
@@ -625,7 +619,6 @@ script:
 
     #[test]
     fn test_repo_spec_with_nested_script() {
-        // Test the case where a RepoSpec has a nested ScriptSpec
         let yaml = r#"
 link:
   "bin/tool": "~/bin/tool"
@@ -659,22 +652,18 @@ script:
 
     #[test]
     fn test_load_test_manifest_with_nested_scripts() {
-        // Test loading from the test/manifest.yml file which includes nested ScriptSpec examples
         let file = std::fs::File::open("test/manifest.yml").expect("test/manifest.yml should exist");
         let reader = std::io::BufReader::new(file);
         let spec = load_manifest_spec(reader).expect("Should parse test/manifest.yml successfully");
 
-        // Verify basic properties
         assert!(spec.verbose);
         assert!(!spec.errors);
 
-        // Check that github section has repos with nested scripts
         assert_eq!(spec.github.repopath, "test_repos");
         assert!(spec.github.items.contains_key("testuser/tool-with-scripts"));
         assert!(spec.github.items.contains_key("testuser/simple-repo"));
         assert!(spec.github.items.contains_key("testuser/complex-repo"));
 
-        // Test the repo with nested scripts
         let tool_repo = spec.github.items.get("testuser/tool-with-scripts").unwrap();
         assert_eq!(tool_repo.cargo.len(), 2);
         assert!(tool_repo.cargo.contains(&"./".to_string()));
@@ -685,7 +674,6 @@ script:
         assert_eq!(tool_repo.link.items.get("config/tool.conf"), Some(&"~/.config/tool/tool.conf".to_string()));
         assert_eq!(tool_repo.link.items.get("scripts/helper.sh"), Some(&"~/bin/helper.sh".to_string()));
 
-        // Test nested scripts
         assert_eq!(tool_repo.script.items.len(), 3);
         assert!(tool_repo.script.items.contains_key("post_install"));
         assert!(tool_repo.script.items.contains_key("configure"));
@@ -706,7 +694,6 @@ script:
         assert!(test.contains("~/bin/tool --version"));
         assert!(test.contains("~/bin/helper.sh --check"));
 
-        // Test complex repo with multiple nested scripts
         let complex_repo = spec.github.items.get("testuser/complex-repo").unwrap();
         assert_eq!(complex_repo.cargo.len(), 3);
         assert!(complex_repo.cargo.contains(&"main-tool".to_string()));
@@ -733,13 +720,11 @@ script:
         assert!(post_build.contains("Post-build configuration"));
         assert!(post_build.contains("cp target/release/main ~/bin/"));
 
-        // Test simple repo without nested scripts
         let simple_repo = spec.github.items.get("testuser/simple-repo").unwrap();
         assert_eq!(simple_repo.cargo.len(), 1);
         assert_eq!(simple_repo.link.items.len(), 1);
-        assert_eq!(simple_repo.script.items.len(), 0); // No nested scripts
+        assert_eq!(simple_repo.script.items.len(), 0);
 
-        // Test top-level scripts
         assert_eq!(spec.script.items.len(), 4);
         assert!(spec.script.items.contains_key("rust"));
         assert!(spec.script.items.contains_key("docker"));

@@ -201,7 +201,6 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
 
         out.push_str(&render_script(&repo_spec.script.items));
 
-        // Add blank line between repos for readability, but not after the last one
         if i < repos.len() - 1 {
             out.push('\n');
         }
@@ -214,13 +213,11 @@ fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
     out.push_str("\necho \"git-crypt repos:\"\n");
 
-    // Check for git-crypt binary
     out.push_str("if ! hash git-crypt >/dev/null 2>&1; then\n");
     out.push_str("  echo \"Error: git-crypt not found. Install with: apt install git-crypt\"\n");
     out.push_str("  exit 1\n");
     out.push_str("fi\n\n");
 
-    // Check for environment variable
     out.push_str("if [[ -z \"${GIT_CRYPT_PASSWORD}\" ]]; then\n");
     out.push_str("  echo \"Error: GIT_CRYPT_PASSWORD environment variable not set\"\n");
     out.push_str("  echo \"Set it with: export GIT_CRYPT_PASSWORD='your-passphrase'\"\n");
@@ -241,7 +238,6 @@ fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
             repo_path
         ));
 
-        // git-crypt unlock step
         out.push_str(&format!(
             "if ! (cd {} && echo \"$GIT_CRYPT_PASSWORD\" | git-crypt unlock -); then\n",
             repo_path
@@ -257,7 +253,6 @@ fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
         out.push_str(&render_repo_links(&repo_path, &repo_spec.link));
         out.push_str(&render_script(&repo_spec.script.items));
 
-        // Add blank line between repos for readability, but not after the last one
         if i < repos.len() - 1 {
             out.push('\n');
         }
@@ -293,7 +288,6 @@ pub fn build_script(sections: &[ManifestType]) -> String {
     script.push_str("    set -x\n");
     script.push_str("fi\n\n");
 
-    // Determine which functions are needed and source them
     let mut needs_linker = false;
     let mut needs_latest = false;
 
@@ -717,7 +711,6 @@ mod tests {
         assert!(result.contains("#!/bin/bash"));
         assert!(result.contains("# generated file by manifest"));
 
-        // Should source functions instead of embedding them
         assert!(result.contains(". $HOME/.local/share/manifest/linker.sh"));
         assert!(result.contains(". $HOME/.local/share/manifest/latest.sh"));
 
@@ -734,7 +727,6 @@ mod tests {
         ];
         let result = build_script(&sections);
 
-        // Should only source linker.sh once even though multiple sections need it
         let linker_source_count = result.matches(". $HOME/.local/share/manifest/linker.sh").count();
         assert_eq!(linker_source_count, 1);
     }
