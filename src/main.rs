@@ -17,45 +17,10 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
 use std::path::Path;
-use std::process::Command;
 use walkdir::WalkDir;
 use chrono::Local;
 use colored::*;
 use clap::CommandFactory;
-
-fn check_hash(program: &str) -> bool {
-    debug!("check_hash: checking for program {}", program);
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {}", program))
-        .output();
-    match output {
-        Ok(o) => {
-            let found = !o.stdout.is_empty();
-            debug!("check_hash: program {} found = {}", program, found);
-            found
-        }
-        Err(e) => {
-            warn!("check_hash: error checking {}: {}", program, e);
-            false
-        }
-    }
-}
-
-fn get_pkgmgr() -> Result<String> {
-    if check_hash("dpkg") {
-        debug!("get_pkgmgr: detected dpkg");
-        Ok("deb".to_string())
-    } else if check_hash("rpm") {
-        debug!("get_pkgmgr: detected rpm");
-        Ok("rpm".to_string())
-    } else if check_hash("brew") {
-        debug!("get_pkgmgr: detected brew");
-        Ok("brew".to_string())
-    } else {
-        Err(eyre::eyre!("unknown pkgmgr!"))
-    }
-}
 
 fn sorted_vec(vec: &[String]) -> Vec<String> {
     debug!("sorted_vec: received input vector with {} items", vec.len());
@@ -268,9 +233,6 @@ fn main() -> Result<()> {
     let complete = !cli.any_section_specified();
     debug!("Complete mode = {}", complete);
 
-    let pkgmgr = get_pkgmgr().wrap_err("Failed to determine package manager")?;
-    debug!("Determined pkgmgr: {}", pkgmgr);
-
     let mut sections: Vec<ManifestType> = Vec::new();
 
     if complete || !cli.link.is_empty() {
@@ -290,7 +252,7 @@ fn main() -> Result<()> {
         }
     }
 
-    if pkgmgr == "deb" {
+    if cli.pkgmgr == "deb" {
         if complete || !cli.apt.is_empty() {
             let merged = merge_pkg_apt(&manifest_spec);
             let apt_items = fuzzy(merged).include(&cli.apt);
@@ -299,7 +261,7 @@ fn main() -> Result<()> {
                 sections.push(ManifestType::Apt(sorted_vec(&apt_items)));
             }
         }
-    } else if pkgmgr == "rpm" {
+    } else if cli.pkgmgr == "rpm" {
         if complete || !cli.dnf.is_empty() {
             let merged = merge_pkg_dnf(&manifest_spec);
             let dnf_items = fuzzy(merged).include(&cli.dnf);

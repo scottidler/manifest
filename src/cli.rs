@@ -1,6 +1,45 @@
 // src/cli.rs
 
+use log::{debug, warn, error};
 use clap::{ArgAction, Parser};
+use std::process::Command;
+
+
+fn check_hash(program: &str) -> bool {
+    debug!("check_hash: checking for program {}", program);
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {}", program))
+        .output();
+    match output {
+        Ok(o) => {
+            let found = !o.stdout.is_empty();
+            debug!("check_hash: program {} found = {}", program, found);
+            found
+        }
+        Err(e) => {
+            warn!("check_hash: error checking {}: {}", program, e);
+            false
+        }
+    }
+}
+
+fn get_pkgmgr() -> String {
+
+    if check_hash("dpkg") {
+        debug!("get_pkgmgr: detected dpkg");
+        "deb".to_string()
+    } else if check_hash("rpm") {
+        debug!("get_pkgmgr: detected rpm");
+        "rpm".to_string()
+    } else if check_hash("brew") {
+        debug!("get_pkgmgr: detected brew");
+        "brew".to_string()
+    } else {
+        error!("unknown pkg mgr");
+        "unknown".to_string()
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -30,7 +69,8 @@ pub struct Cli {
         short = 'M',
         long = "pkgmgr",
         default_value = "",
-        help = "Override package manager; e.g. 'deb', 'rpm', 'brew'"
+        help = "Override package manager; e.g. 'deb', 'rpm', 'brew'",
+        default_value_t = get_pkgmgr()
     )]
     pub pkgmgr: String,
 
