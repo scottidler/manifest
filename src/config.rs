@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::from_reader;
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::PathBuf;
 
 pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
     let parsed: ManifestSpec = from_reader(r)?;
@@ -148,6 +149,39 @@ pub struct GitCryptSpec {
     #[serde(default)]
     #[serde(flatten)]
     pub items: HashMap<String, RepoSpec>,
+}
+
+impl ManifestSpec {
+    pub fn load_from_standard_locations(config_path: Option<String>) -> Result<Self> {
+        let config_file = match config_path {
+            Some(path) => PathBuf::from(path),
+            None => Self::find_config_file()?,
+        };
+
+        if config_file.exists() {
+            let file = std::fs::File::open(&config_file)?;
+            load_manifest_spec(file)
+        } else {
+            Ok(ManifestSpec::default())
+        }
+    }
+
+    fn find_config_file() -> Result<PathBuf> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let candidates = vec![
+            PathBuf::from(format!("{}/.config/manifest/manifest.yml", home)),
+            PathBuf::from("./manifest.yml"),
+        ];
+
+        for candidate in candidates {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+
+        // Return primary location even if it doesn't exist
+        Ok(PathBuf::from(format!("{}/.config/manifest/manifest.yml", home)))
+    }
 }
 
 #[cfg(test)]

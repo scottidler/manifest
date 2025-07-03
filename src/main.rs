@@ -14,13 +14,11 @@ use eyre::Result;
 use eyre::WrapErr;
 use log::*;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Write};
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use chrono::Local;
-use colored::*;
-use clap::CommandFactory;
 
 fn sorted_vec(vec: &[String]) -> Vec<String> {
     debug!("sorted_vec: received input vector with {} items", vec.len());
@@ -176,53 +174,44 @@ fn ensure_manifest_functions_with_home_and_bin(home_override: Option<&str>, bin_
     Ok(())
 }
 
-fn main() -> Result<()> {
-    use env_logger::Builder;
-    use log::LevelFilter;
+fn setup_logging() -> Result<()> {
+    use env_logger::Target;
 
-    let mut log_builder = Builder::new();
-    log_builder.filter_level(LevelFilter::Info);
-    if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        log_builder.parse_filters(&rust_log);
-    }
-    let log_file_path = std::env::var("HOME")
-        .map(|home| format!("{}/manifest.log", home))
-        .unwrap_or_else(|_| "manifest.log".to_string());
-    let file = OpenOptions::new()
-        .append(true)
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = PathBuf::from(format!("{}/.local/share/manifest/logs", home));
+
+    std::fs::create_dir_all(&log_dir)?;
+    let log_file_path = log_dir.join("manifest.log");
+
+    let log_file = OpenOptions::new()
         .create(true)
-        .open(&log_file_path)
-        .expect("Unable to open log file");
+        .append(true)
+        .open(&log_file_path)?;
+
     writeln!(
-        &file,
+        &log_file,
         "\n================ New run at {} ================",
         Local::now()
-    )
-    .expect("Unable to write log separator");
-    log_builder.target(env_logger::Target::Pipe(Box::new(file)));
-    log_builder.init();
+    )?;
 
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
+        .target(Target::Pipe(Box::new(log_file)))
+        .init();
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    setup_logging()?;
     info!("Starting manifest generation");
 
     ensure_manifest_functions().wrap_err("Failed to ensure manifest function files")?;
 
-    let cli = Cli::parse();
     debug!("Parsed CLI arguments: {:?}", cli);
 
-    let file = match File::open(&cli.config) {
-        Ok(f) => f,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Cli::command().print_help().unwrap();
-                println!("");
-            }
-            eprintln!("Error: Failed to open config file: {}", cli.config.red());
-            std::process::exit(1);
-        }
-    };
-    debug!("Opened config file: {}", cli.config);
-    let mut reader = BufReader::new(file);
-    let manifest_spec: ManifestSpec = config::load_manifest_spec(&mut reader).wrap_err("Failed to load manifest spec")?;
+    let manifest_spec = ManifestSpec::load_from_standard_locations(Some(cli.config.clone()))?;
     debug!("Loaded manifest spec: {:?}", manifest_spec);
 
     let complete = !cli.any_section_specified();
