@@ -4,4 +4,4 @@ HOME/.gnupg/** filter=git-crypt diff=git-crypt
 HOME/.api/** filter=git-crypt diff=git-crypt
 
 # Don't encrypt the README
-README.md !filter !diff 
+README.md !filter !diff

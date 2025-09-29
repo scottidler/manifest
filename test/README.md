@@ -234,4 +234,4 @@ When adding new Spec types or modifying existing ones:
 1. Add corresponding tests in `src/config.rs` for YAML parsing
 2. Add corresponding tests in `src/manifest.rs` for bash generation
 3. Update `test/manifest.yml` with examples of the new functionality
-4. Update this README with documentation of the new tests 
+4. Update this README with documentation of the new tests

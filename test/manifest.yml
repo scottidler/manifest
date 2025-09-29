@@ -160,4 +160,4 @@ script:
       pkg-config \
       libssl-dev \
       libsqlite3-dev
-    echo "Development tools installed" 
+    echo "Development tools installed"

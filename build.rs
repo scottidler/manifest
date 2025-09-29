@@ -10,4 +10,4 @@ fn main() {
     println!("cargo:rustc-env=GIT_DESCRIBE={}", git_describe);
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/");
-} 
+}
