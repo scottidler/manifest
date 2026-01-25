@@ -1,6 +1,7 @@
 // src/age.rs
 
 use age::armor::{ArmoredReader, ArmoredWriter, Format};
+use age::secrecy::ExposeSecret;
 use age::{Decryptor, Encryptor, Identity, Recipient};
 use eyre::{Result, WrapErr, eyre};
 use log::error;
@@ -137,8 +138,54 @@ pub fn parse_recipient(public_key: &str) -> Result<Box<dyn Recipient + Send>> {
     ))
 }
 
-/// Get public key from an identity (used in Phase 3 --public-key)
-#[allow(dead_code)]
+// ============ IDENTITY MANAGEMENT ============
+
+/// Generate a new age identity and save to default location
+pub fn generate_identity() -> Result<String> {
+    let home = std::env::var("HOME").wrap_err("HOME environment variable not set")?;
+    let identity_dir = format!("{}/.config/manifest", home);
+    let identity_path = format!("{}/identity.txt", identity_dir);
+
+    // Check if identity already exists
+    if Path::new(&identity_path).exists() {
+        return Err(eyre!(
+            "Identity file already exists: {}\nTo generate a new one, first remove or rename the existing file.",
+            identity_path
+        ));
+    }
+
+    // Create directory if needed
+    fs::create_dir_all(&identity_dir).wrap_err_with(|| format!("Failed to create directory: {}", identity_dir))?;
+
+    // Generate identity
+    let identity = age::x25519::Identity::generate();
+    let public_key = identity.to_public().to_string();
+
+    // Write identity file with public key comment
+    let content = format!(
+        "# created: {}\n# public key: {}\n{}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        public_key,
+        identity.to_string().expose_secret()
+    );
+
+    fs::write(&identity_path, content).wrap_err_with(|| format!("Failed to write identity: {}", identity_path))?;
+
+    // Set restrictive permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&identity_path, perms)?;
+    }
+
+    Ok(format!(
+        "Identity saved to: {}\nPublic key: {}",
+        identity_path, public_key
+    ))
+}
+
+/// Get public key from an identity
 pub fn get_public_key(identity_path: &Path) -> Result<String> {
     let content = fs::read_to_string(identity_path)
         .wrap_err_with(|| format!("Failed to read identity: {}", identity_path.display()))?;

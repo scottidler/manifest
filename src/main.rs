@@ -203,9 +203,41 @@ fn handle_age_command(
     decrypt: Option<String>,
     identity: Option<String>,
     recipient: Option<String>,
-    _keygen: bool,
-    _public_key: bool,
+    keygen: bool,
+    public_key: bool,
 ) -> Result<()> {
+    // Handle --keygen
+    if keygen {
+        let output = age::generate_identity()?;
+        println!("{}", output);
+        return Ok(());
+    }
+
+    // Handle --public-key
+    if public_key {
+        let identity_path = if let Some(path) = &identity {
+            std::path::PathBuf::from(path)
+        } else {
+            // Use default identity path
+            let home = std::env::var("HOME").wrap_err("HOME environment variable not set")?;
+            let candidates = [
+                format!("{}/.config/manifest/identity.txt", home),
+                format!("{}/.ssh/id_ed25519", home),
+                format!("{}/.ssh/id_rsa", home),
+            ];
+
+            candidates
+                .iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| eyre::eyre!("No identity file found"))?
+        };
+
+        let pubkey = age::get_public_key(&identity_path)?;
+        println!("{}", pubkey);
+        return Ok(());
+    }
+
     // Handle decryption
     if let Some(path) = decrypt {
         let identity_ref = age::resolve_identity(identity.as_deref())?;
