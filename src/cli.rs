@@ -1,9 +1,8 @@
 // src/cli.rs
 
-use log::{debug, warn, error};
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
+use log::{debug, error, warn};
 use std::process::Command;
-
 
 fn check_hash(program: &str) -> bool {
     debug!("check_hash: checking for program {}", program);
@@ -25,7 +24,6 @@ fn check_hash(program: &str) -> bool {
 }
 
 fn get_pkgmgr() -> String {
-
     if check_hash("dpkg") {
         debug!("get_pkgmgr: detected dpkg");
         "deb".to_string()
@@ -57,12 +55,7 @@ pub struct Cli {
     )]
     pub config: String,
 
-    #[arg(
-        short = 'H',
-        long = "home",
-        default_value = "",
-        help = "Specify HOME if not current"
-    )]
+    #[arg(short = 'H', long = "home", default_value = "", help = "Specify HOME if not current")]
     pub home: String,
 
     #[arg(
@@ -201,6 +194,39 @@ pub struct Cli {
         help = "Optional positional path to operate on; defaults to the current working directory"
     )]
     pub path: String,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Encrypt and decrypt secrets using age encryption
+    Age {
+        /// Encrypt a file (output to stdout)
+        #[arg(short = 'e', long = "encrypt", value_name = "FILE")]
+        encrypt: Option<String>,
+
+        /// Decrypt .age files in PATH, output shell exports
+        #[arg(short = 'd', long = "decrypt", value_name = "PATH", default_missing_value = ".", num_args = 0..=1)]
+        decrypt: Option<String>,
+
+        /// Identity file for encryption/decryption
+        #[arg(short = 'i', long = "identity", value_name = "FILE")]
+        identity: Option<String>,
+
+        /// Recipient public key for encryption (alternative to identity)
+        #[arg(short = 'r', long = "recipient", value_name = "KEY")]
+        recipient: Option<String>,
+
+        /// Generate a new age identity
+        #[arg(long = "keygen")]
+        keygen: bool,
+
+        /// Show public key from identity
+        #[arg(long = "public-key")]
+        public_key: bool,
+    },
 }
 
 impl Cli {

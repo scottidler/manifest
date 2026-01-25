@@ -2,7 +2,7 @@ use std::process::Command;
 
 fn main() {
     let git_describe = Command::new("git")
-        .args(&["describe", "--tags", "--always"])
+        .args(["describe", "--tags", "--always"])
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string());

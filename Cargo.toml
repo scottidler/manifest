@@ -10,6 +10,7 @@ homepage = "https://github.com/scottidler/manifest"
 documentation = "https://github.com/scottidler/manifest"
 
 [dependencies]
+age = { version = "0.11", features = ["armor", "ssh"] }
 chrono = "0.4.41"
 clap = { version = "4.5.40", features = ["derive"] }
 env_logger = "0.11.8"

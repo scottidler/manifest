@@ -1,14 +1,16 @@
 // src/main.rs
 
-mod config;
-mod manifest;
+mod age;
 mod cli;
+mod config;
 mod fuzzy;
+mod manifest;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Commands};
 use crate::config::*;
-use crate::manifest::{ManifestType, build_script};
 use crate::fuzzy::*;
+use crate::manifest::{ManifestType, build_script};
+use chrono::Local;
 use clap::Parser;
 use eyre::Result;
 use eyre::WrapErr;
@@ -18,7 +20,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-use chrono::Local;
 
 fn sorted_vec(vec: &[String]) -> Vec<String> {
     debug!("sorted_vec: received input vector with {} items", vec.len());
@@ -139,12 +140,11 @@ fn ensure_manifest_functions_with_home_and_bin(home_override: Option<&str>, bin_
     for entry in bin_entries {
         let entry = entry?;
         let path = entry.path();
-        if let Some(extension) = path.extension() {
-            if extension == "sh" {
-                if let Some(filename) = path.file_name() {
-                    shell_files.push(filename.to_string_lossy().to_string());
-                }
-            }
+        if let Some(extension) = path.extension()
+            && extension == "sh"
+            && let Some(filename) = path.file_name()
+        {
+            shell_files.push(filename.to_string_lossy().to_string());
         }
     }
 
@@ -183,10 +183,7 @@ fn setup_logging() -> Result<()> {
     std::fs::create_dir_all(&log_dir)?;
     let log_file_path = log_dir.join("manifest.log");
 
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file_path)?;
+    let log_file = OpenOptions::new().create(true).append(true).open(&log_file_path)?;
 
     writeln!(
         &log_file,
@@ -201,10 +198,58 @@ fn setup_logging() -> Result<()> {
     Ok(())
 }
 
+fn handle_age_command(
+    encrypt: Option<String>,
+    decrypt: Option<String>,
+    identity: Option<String>,
+    _recipient: Option<String>,
+    _keygen: bool,
+    _public_key: bool,
+) -> Result<()> {
+    // Phase 1: Only decrypt is implemented
+    if let Some(path) = decrypt {
+        let identity_ref = age::resolve_identity(identity.as_deref())?;
+        let path = std::path::Path::new(&path);
+        let output = age::render_exports(path, identity_ref.as_ref());
+        print!("{}", output);
+        return Ok(());
+    }
+
+    if encrypt.is_some() {
+        return Err(eyre::eyre!("Encryption not yet implemented (Phase 2)"));
+    }
+
+    Err(eyre::eyre!("No action specified. Use -d to decrypt or -e to encrypt."))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     setup_logging()?;
+
+    // Handle subcommands first
+    if let Some(command) = &cli.command {
+        match command {
+            Commands::Age {
+                encrypt,
+                decrypt,
+                identity,
+                recipient,
+                keygen,
+                public_key,
+            } => {
+                return handle_age_command(
+                    encrypt.clone(),
+                    decrypt.clone(),
+                    identity.clone(),
+                    recipient.clone(),
+                    *keygen,
+                    *public_key,
+                );
+            }
+        }
+    }
+
     info!("Starting manifest generation");
 
     ensure_manifest_functions().wrap_err("Failed to ensure manifest function files")?;
@@ -219,13 +264,11 @@ fn main() -> Result<()> {
 
     let mut sections: Vec<ManifestType> = Vec::new();
 
-    if complete || !cli.link.is_empty() {
-        if !manifest_spec.link.items.is_empty() || manifest_spec.link.recursive {
-            let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
-            let filtered = fuzzy(lines).include(&cli.link);
-            debug!("Adding Link section with {} lines", filtered.len());
-            sections.push(ManifestType::Link(sorted_vec(&filtered)));
-        }
+    if (complete || !cli.link.is_empty()) && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive) {
+        let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
+        let filtered = fuzzy(lines).include(&cli.link);
+        debug!("Adding Link section with {} lines", filtered.len());
+        sections.push(ManifestType::Link(sorted_vec(&filtered)));
     }
 
     if complete || !cli.ppa.is_empty() {
@@ -236,23 +279,19 @@ fn main() -> Result<()> {
         }
     }
 
-    if cli.pkgmgr == "deb" {
-        if complete || !cli.apt.is_empty() {
-            let merged = merge_pkg_apt(&manifest_spec);
-            let apt_items = fuzzy(merged).include(&cli.apt);
-            if !apt_items.is_empty() {
-                debug!("Adding Apt section with {} merged items", apt_items.len());
-                sections.push(ManifestType::Apt(sorted_vec(&apt_items)));
-            }
+    if cli.pkgmgr == "deb" && (complete || !cli.apt.is_empty()) {
+        let merged = merge_pkg_apt(&manifest_spec);
+        let apt_items = fuzzy(merged).include(&cli.apt);
+        if !apt_items.is_empty() {
+            debug!("Adding Apt section with {} merged items", apt_items.len());
+            sections.push(ManifestType::Apt(sorted_vec(&apt_items)));
         }
-    } else if cli.pkgmgr == "rpm" {
-        if complete || !cli.dnf.is_empty() {
-            let merged = merge_pkg_dnf(&manifest_spec);
-            let dnf_items = fuzzy(merged).include(&cli.dnf);
-            if !dnf_items.is_empty() {
-                debug!("Adding Dnf section with {} merged items", dnf_items.len());
-                sections.push(ManifestType::Dnf(sorted_vec(&dnf_items)));
-            }
+    } else if cli.pkgmgr == "rpm" && (complete || !cli.dnf.is_empty()) {
+        let merged = merge_pkg_dnf(&manifest_spec);
+        let dnf_items = fuzzy(merged).include(&cli.dnf);
+        if !dnf_items.is_empty() {
+            debug!("Adding Dnf section with {} merged items", dnf_items.len());
+            sections.push(ManifestType::Dnf(sorted_vec(&dnf_items)));
         }
     }
 
@@ -299,11 +338,13 @@ fn main() -> Result<()> {
     }
 
     if complete || !cli.github.is_empty() {
-        let github_items: HashMap<String, RepoSpec> =
-            fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
+        let github_items: HashMap<String, RepoSpec> = fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
         if !github_items.is_empty() {
             debug!("Adding Github section with {} repos", github_items.len());
-            sections.push(ManifestType::Github(github_items, manifest_spec.github.repopath.clone()));
+            sections.push(ManifestType::Github(
+                github_items,
+                manifest_spec.github.repopath.clone(),
+            ));
         }
     }
 
@@ -312,7 +353,10 @@ fn main() -> Result<()> {
             fuzzy(manifest_spec.git_crypt.items.clone()).include(&cli.git_crypt);
         if !gitcrypt_items.is_empty() {
             debug!("Adding GitCrypt section with {} repos", gitcrypt_items.len());
-            sections.push(ManifestType::GitCrypt(gitcrypt_items, manifest_spec.git_crypt.repopath.clone()));
+            sections.push(ManifestType::GitCrypt(
+                gitcrypt_items,
+                manifest_spec.git_crypt.repopath.clone(),
+            ));
         }
     }
 
@@ -454,10 +498,7 @@ mod tests {
         let existing_content = "existing() {\n  echo 'exists'\n}";
         let new_content = "new() {\n  echo 'new'\n}";
 
-        let temp_bin = create_bin_dir_with_files(&[
-            ("existing.sh", existing_content),
-            ("new.sh", new_content),
-        ]);
+        let temp_bin = create_bin_dir_with_files(&[("existing.sh", existing_content), ("new.sh", new_content)]);
         let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
 
         let manifest_dir = manifest_dir_path(&home_path);

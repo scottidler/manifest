@@ -120,7 +120,7 @@ pub struct ScriptSpec {
 }
 
 fn default_repopath() -> String {
-  "repos".to_string()
+    "repos".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -228,10 +228,7 @@ HOME: $HOME
     fn test_link_spec_serialization() {
         let mut items = HashMap::new();
         items.insert("src".to_string(), "dst".to_string());
-        let spec = LinkSpec {
-            recursive: true,
-            items,
-        };
+        let spec = LinkSpec { recursive: true, items };
         let yaml = serde_yaml::to_string(&spec).unwrap();
         assert!(yaml.contains("recursive: true"));
         assert!(yaml.contains("src: dst"));
@@ -390,7 +387,12 @@ docker: |
         assert!(spec.items.contains_key("rust"));
         assert!(spec.items.contains_key("docker"));
         assert!(spec.items.get("rust").unwrap().contains("curl https://sh.rustup.rs"));
-        assert!(spec.items.get("docker").unwrap().contains("curl -fsSL https://download.docker.com"));
+        assert!(
+            spec.items
+                .get("docker")
+                .unwrap()
+                .contains("curl -fsSL https://download.docker.com")
+        );
     }
 
     #[test]
@@ -416,8 +418,14 @@ repopath: custom_repos
         assert_eq!(repo_spec.cargo.len(), 1);
         assert_eq!(repo_spec.cargo[0], "./");
         assert_eq!(repo_spec.link.items.len(), 2);
-        assert_eq!(repo_spec.link.items.get("bin/aka.zsh"), Some(&"~/.config/aka/aka.zsh".to_string()));
-        assert_eq!(repo_spec.link.items.get("bin/_aka_commands"), Some(&"~/.shell-completions.d/_aka_commands".to_string()));
+        assert_eq!(
+            repo_spec.link.items.get("bin/aka.zsh"),
+            Some(&"~/.config/aka/aka.zsh".to_string())
+        );
+        assert_eq!(
+            repo_spec.link.items.get("bin/_aka_commands"),
+            Some(&"~/.shell-completions.d/_aka_commands".to_string())
+        );
         assert_eq!(repo_spec.script.items.len(), 1);
         assert!(repo_spec.script.items.get("setup").unwrap().contains("Setting up aka"));
     }
@@ -454,11 +462,27 @@ repopath: secrets
 
         let repo_spec = spec.items.get("scottidler/personal-secrets").unwrap();
         assert_eq!(repo_spec.link.items.len(), 3);
-        assert_eq!(repo_spec.link.items.get("ssh/id_rsa"), Some(&"~/.ssh/id_rsa".to_string()));
-        assert_eq!(repo_spec.link.items.get("ssh/id_rsa.pub"), Some(&"~/.ssh/id_rsa.pub".to_string()));
-        assert_eq!(repo_spec.link.items.get("gpg/private.asc"), Some(&"~/.gnupg/private.asc".to_string()));
+        assert_eq!(
+            repo_spec.link.items.get("ssh/id_rsa"),
+            Some(&"~/.ssh/id_rsa".to_string())
+        );
+        assert_eq!(
+            repo_spec.link.items.get("ssh/id_rsa.pub"),
+            Some(&"~/.ssh/id_rsa.pub".to_string())
+        );
+        assert_eq!(
+            repo_spec.link.items.get("gpg/private.asc"),
+            Some(&"~/.gnupg/private.asc".to_string())
+        );
         assert_eq!(repo_spec.script.items.len(), 1);
-        assert!(repo_spec.script.items.get("post_unlock").unwrap().contains("chmod 600 ~/.ssh/id_rsa"));
+        assert!(
+            repo_spec
+                .script
+                .items
+                .get("post_unlock")
+                .unwrap()
+                .contains("chmod 600 ~/.ssh/id_rsa")
+        );
     }
 
     #[test]
@@ -495,7 +519,13 @@ script:
         assert!(spec.cargo.contains(&"./".to_string()));
         assert!(spec.cargo.contains(&"subdir".to_string()));
         assert_eq!(spec.script.items.len(), 2);
-        assert!(spec.script.items.get("build").unwrap().contains("cargo build --release"));
+        assert!(
+            spec.script
+                .items
+                .get("build")
+                .unwrap()
+                .contains("cargo build --release")
+        );
         assert!(spec.script.items.get("test").unwrap().contains("cargo test"));
     }
 
@@ -705,8 +735,14 @@ script:
 
         assert_eq!(tool_repo.link.items.len(), 3);
         assert_eq!(tool_repo.link.items.get("bin/tool"), Some(&"~/bin/tool".to_string()));
-        assert_eq!(tool_repo.link.items.get("config/tool.conf"), Some(&"~/.config/tool/tool.conf".to_string()));
-        assert_eq!(tool_repo.link.items.get("scripts/helper.sh"), Some(&"~/bin/helper.sh".to_string()));
+        assert_eq!(
+            tool_repo.link.items.get("config/tool.conf"),
+            Some(&"~/.config/tool/tool.conf".to_string())
+        );
+        assert_eq!(
+            tool_repo.link.items.get("scripts/helper.sh"),
+            Some(&"~/bin/helper.sh".to_string())
+        );
 
         assert_eq!(tool_repo.script.items.len(), 3);
         assert!(tool_repo.script.items.contains_key("post_install"));

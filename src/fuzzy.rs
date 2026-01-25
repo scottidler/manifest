@@ -2,9 +2,9 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use regex::Regex;
 use glob::Pattern;
+use regex::Regex;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct FuzzyError(pub String);
@@ -77,10 +77,8 @@ impl Fuzz for Vec<String> {
         for &mt in DEFAULT_MATCH_TYPES.iter() {
             let results: Vec<String> = items
                 .iter()
+                .filter(|item| patterns.iter().any(|pattern| match_str(item, pattern, mt)))
                 .cloned()
-                .filter(|item| {
-                    patterns.iter().any(|pattern| match_str(item, pattern, mt))
-                })
                 .collect();
             if !results.is_empty() {
                 return results;
@@ -97,10 +95,8 @@ impl Fuzz for Vec<String> {
         for &mt in DEFAULT_MATCH_TYPES.iter() {
             let results: Vec<String> = items
                 .iter()
+                .filter(|item| patterns.iter().all(|pattern| !match_str(item, pattern, mt)))
                 .cloned()
-                .filter(|item| {
-                    patterns.iter().all(|pattern| !match_str(item, pattern, mt))
-                })
                 .collect();
             if !results.is_empty() {
                 return results;
@@ -125,10 +121,8 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
         for &mt in DEFAULT_MATCH_TYPES.iter() {
             let matched_keys: Vec<String> = keys
                 .iter()
+                .filter(|key| patterns.iter().any(|pattern| match_str(key, pattern, mt)))
                 .cloned()
-                .filter(|key| {
-                    patterns.iter().any(|pattern| match_str(key, pattern, mt))
-                })
                 .collect();
             if !matched_keys.is_empty() {
                 let cloned = self.clone();
@@ -150,10 +144,8 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
         for &mt in DEFAULT_MATCH_TYPES.iter() {
             let remaining_keys: Vec<String> = keys
                 .iter()
+                .filter(|key| patterns.iter().all(|pattern| !match_str(key, pattern, mt)))
                 .cloned()
-                .filter(|key| {
-                    patterns.iter().all(|pattern| !match_str(key, pattern, mt))
-                })
                 .collect();
             if !remaining_keys.is_empty() {
                 let cloned = self.clone();

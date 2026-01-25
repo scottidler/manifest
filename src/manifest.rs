@@ -1,7 +1,7 @@
 // src/manifest.rs
 
+use crate::config::{LinkSpec, RepoSpec};
 use std::collections::HashMap;
-use crate::config::{RepoSpec, LinkSpec};
 
 #[derive(Debug)]
 pub enum ManifestType {
@@ -37,12 +37,12 @@ impl ManifestType {
         match self {
             ManifestType::Link(items) => {
                 let header = r#"echo "links:""#;
-                let block  = r#"linker $file $link"#;
+                let block = r#"linker $file $link"#;
                 render_heredoc(header, block, items)
             }
             ManifestType::Ppa(items) => {
                 let header = r#"echo "ppas:""#;
-                let block  = r#"ppas=$(somecheck)
+                let block = r#"ppas=$(somecheck)
 if [[ $ppas != *"$pkg"* ]]; then
   sudo add-apt-repository -y "ppa:$pkg"
 fi"#;
@@ -51,47 +51,43 @@ fi"#;
             ManifestType::Apt(items) => {
                 let header = r#"echo "apts:"
 sudo apt update && sudo apt upgrade -y && sudo apt install -y software-properties-common"#;
-                let block  = r#"sudo apt install -y"#;
+                let block = r#"sudo apt install -y"#;
                 render_continue(header, block, items)
             }
             ManifestType::Dnf(items) => {
                 let header = r#"echo "dnf packages:""#;
-                let block  = r#"sudo dnf install -y"#;
+                let block = r#"sudo dnf install -y"#;
                 render_continue(header, block, items)
             }
             ManifestType::Npm(items) => {
                 let header = r#"echo "npm packages:""#;
-                let block  = r#"sudo npm install -g"#;
+                let block = r#"sudo npm install -g"#;
                 render_continue(header, block, items)
             }
             ManifestType::Pip3(items) => {
                 let header = r#"echo "pip3 packages:"
 sudo apt-get install -y python3-dev
 sudo -H pip3 install --upgrade pip setuptools"#;
-                let block  = r#"sudo -H pip3 install --upgrade"#;
+                let block = r#"sudo -H pip3 install --upgrade"#;
                 render_continue(header, block, items)
             }
             ManifestType::Pipx(items) => {
                 let header = r#"echo "pipx:""#;
-                let block  = r#"pipx install "$pkg""#;
+                let block = r#"pipx install "$pkg""#;
                 render_heredoc(header, block, items)
             }
             ManifestType::Flatpak(items) => {
                 let header = r#"echo "flatpaks:""#;
-                let block  = r#"flatpak install --assumeyes --or-update"#;
+                let block = r#"flatpak install --assumeyes --or-update"#;
                 render_continue(header, block, items)
             }
             ManifestType::Cargo(items) => {
                 let header = r#"echo "cargo crates:""#;
-                let block  = r#"cargo install"#;
+                let block = r#"cargo install"#;
                 render_continue(header, block, items)
             }
-            ManifestType::Github(map, repopath) => {
-                render_github(map, repopath)
-            }
-            ManifestType::GitCrypt(map, repopath) => {
-                render_gitcrypt(map, repopath)
-            }
+            ManifestType::Github(map, repopath) => render_github(map, repopath),
+            ManifestType::GitCrypt(map, repopath) => render_gitcrypt(map, repopath),
             ManifestType::Script(map) => render_script(map),
         }
     }
@@ -101,15 +97,18 @@ fn render_heredoc(header: &str, block: &str, items: &[String]) -> String {
     let items = items.join("\n");
     if header.is_empty() {
         format!(
-"while read -r file link; do
+            "while read -r file link; do
     {block}
 done<<EOM
 {items}
 EOM
-", block = block, items = items)
+",
+            block = block,
+            items = items
+        )
     } else {
         format!(
-r#"
+            r#"
 {header}
 while read -r file link; do
     {block}
@@ -127,7 +126,7 @@ EOM
 fn render_continue(header: &str, block: &str, items: &[String]) -> String {
     let items = items.join(" \\\n    ");
     format!(
-r#"
+        r#"
 {header}
 {block} {items}
 "#,
@@ -145,7 +144,8 @@ fn render_repo_links(repo_path: &str, link_spec: &LinkSpec) -> String {
     let mut link_lines = Vec::new();
     for (src, dst) in &link_spec.items {
         let path = std::path::Path::new(repo_path).join(src);
-        let full_src = path.components()
+        let full_src = path
+            .components()
             .filter(|c| *c != std::path::Component::CurDir)
             .collect::<std::path::PathBuf>()
             .to_string_lossy()
@@ -169,10 +169,7 @@ fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
     for rel_path in paths {
         let install_dir = format!("{}/{}", repo_path, rel_path);
         out.push_str(&format!("echo \"Installing from {}\"\n", install_dir));
-        out.push_str(&format!(
-            "(cd {} && cargo install --path .)\n",
-            install_dir
-        ));
+        out.push_str(&format!("(cd {} && cargo install --path .)\n", install_dir));
     }
     out
 }
@@ -190,10 +187,7 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
             "git clone --recursive https://github.com/{} {} \n",
             repo_name, repo_path
         ));
-        out.push_str(&format!(
-            "(cd {} && pwd && git pull && git checkout HEAD)\n",
-            repo_path
-        ));
+        out.push_str(&format!("(cd {} && pwd && git pull && git checkout HEAD)\n", repo_path));
 
         out.push_str(&render_repo_cargo_install(&repo_path, &repo_spec.cargo));
 
@@ -233,10 +227,7 @@ fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
             "git clone --recursive https://github.com/{} {} \n",
             repo_name, repo_path
         ));
-        out.push_str(&format!(
-            "(cd {} && pwd && git pull && git checkout HEAD)\n",
-            repo_path
-        ));
+        out.push_str(&format!("(cd {} && pwd && git pull && git checkout HEAD)\n", repo_path));
 
         out.push_str(&format!(
             "if ! (cd {} && echo \"$GIT_CRYPT_PASSWORD\" | git-crypt unlock -); then\n",
@@ -307,7 +298,7 @@ pub fn build_script(sections: &[ManifestType]) -> String {
         script.push_str(". $HOME/.local/share/manifest/latest.sh\n");
     }
     if needs_linker || needs_latest {
-        script.push_str("\n");
+        script.push('\n');
     }
 
     for (i, sec) in sections.iter().enumerate() {
@@ -329,10 +320,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_link_render() {
-        let items = vec![
-            "src1 dst1".to_string(),
-            "src2 dst2".to_string(),
-        ];
+        let items = vec!["src1 dst1".to_string(), "src2 dst2".to_string()];
         let manifest_type = ManifestType::Link(items);
         let rendered = manifest_type.render();
 
@@ -346,10 +334,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_ppa_render() {
-        let items = vec![
-            "git-core/ppa".to_string(),
-            "mkusb/ppa".to_string(),
-        ];
+        let items = vec!["git-core/ppa".to_string(), "mkusb/ppa".to_string()];
         let manifest_type = ManifestType::Ppa(items);
         let rendered = manifest_type.render();
 
@@ -382,10 +367,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_dnf_render() {
-        let items = vec![
-            "the_silver_searcher".to_string(),
-            "gcc".to_string(),
-        ];
+        let items = vec!["the_silver_searcher".to_string(), "gcc".to_string()];
         let manifest_type = ManifestType::Dnf(items);
         let rendered = manifest_type.render();
 
@@ -396,10 +378,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_npm_render() {
-        let items = vec![
-            "diff-so-fancy".to_string(),
-            "wt-cli".to_string(),
-        ];
+        let items = vec!["diff-so-fancy".to_string(), "wt-cli".to_string()];
         let manifest_type = ManifestType::Npm(items);
         let rendered = manifest_type.render();
 
@@ -410,11 +389,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_pip3_render() {
-        let items = vec![
-            "argh".to_string(),
-            "numpy".to_string(),
-            "twine".to_string(),
-        ];
+        let items = vec!["argh".to_string(), "numpy".to_string(), "twine".to_string()];
         let manifest_type = ManifestType::Pip3(items);
         let rendered = manifest_type.render();
 
@@ -428,10 +403,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_pipx_render() {
-        let items = vec![
-            "doit".to_string(),
-            "mypy".to_string(),
-        ];
+        let items = vec!["doit".to_string(), "mypy".to_string()];
         let manifest_type = ManifestType::Pipx(items);
         let rendered = manifest_type.render();
 
@@ -444,10 +416,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_flatpak_render() {
-        let items = vec![
-            "org.gnome.GTG".to_string(),
-            "org.gnome.BreakTimer".to_string(),
-        ];
+        let items = vec!["org.gnome.GTG".to_string(), "org.gnome.BreakTimer".to_string()];
         let manifest_type = ManifestType::Flatpak(items);
         let rendered = manifest_type.render();
 
@@ -458,10 +427,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_cargo_render() {
-        let items = vec![
-            "bat".to_string(),
-            "cargo-expand".to_string(),
-        ];
+        let items = vec!["bat".to_string(), "cargo-expand".to_string()];
         let manifest_type = ManifestType::Cargo(items);
         let rendered = manifest_type.render();
 
@@ -488,10 +454,18 @@ mod tests {
     #[test]
     fn test_manifest_type_github_render() {
         let mut items = HashMap::new();
-        let mut repo_spec = crate::config::RepoSpec::default();
-        repo_spec.cargo = vec!["./".to_string()];
-        repo_spec.link.items.insert("bin/test".to_string(), "~/bin/test".to_string());
-        repo_spec.script.items.insert("setup".to_string(), "echo 'Setting up test repo'".to_string());
+        let mut repo_spec = crate::config::RepoSpec {
+            cargo: vec!["./".to_string()],
+            ..Default::default()
+        };
+        repo_spec
+            .link
+            .items
+            .insert("bin/test".to_string(), "~/bin/test".to_string());
+        repo_spec
+            .script
+            .items
+            .insert("setup".to_string(), "echo 'Setting up test repo'".to_string());
         items.insert("scottidler/test".to_string(), repo_spec);
 
         let manifest_type = ManifestType::Github(items, "repos".to_string());
@@ -510,9 +484,18 @@ mod tests {
     fn test_manifest_type_git_crypt_render() {
         let mut items = HashMap::new();
         let mut repo_spec = crate::config::RepoSpec::default();
-        repo_spec.link.items.insert("ssh/id_rsa".to_string(), "~/.ssh/id_rsa".to_string());
-        repo_spec.link.items.insert("gpg/private.asc".to_string(), "~/.gnupg/private.asc".to_string());
-        repo_spec.script.items.insert("post_unlock".to_string(), "chmod 600 ~/.ssh/id_rsa\ngpg --import ~/.gnupg/private.asc".to_string());
+        repo_spec
+            .link
+            .items
+            .insert("ssh/id_rsa".to_string(), "~/.ssh/id_rsa".to_string());
+        repo_spec
+            .link
+            .items
+            .insert("gpg/private.asc".to_string(), "~/.gnupg/private.asc".to_string());
+        repo_spec.script.items.insert(
+            "post_unlock".to_string(),
+            "chmod 600 ~/.ssh/id_rsa\ngpg --import ~/.gnupg/private.asc".to_string(),
+        );
         items.insert("scottidler/secrets".to_string(), repo_spec);
 
         let manifest_type = ManifestType::GitCrypt(items, "repos".to_string());
@@ -604,7 +587,9 @@ mod tests {
     fn test_render_repo_links() {
         let mut link_spec = crate::config::LinkSpec::default();
         link_spec.items.insert("bin/tool".to_string(), "~/bin/tool".to_string());
-        link_spec.items.insert("config/tool.conf".to_string(), "~/.config/tool.conf".to_string());
+        link_spec
+            .items
+            .insert("config/tool.conf".to_string(), "~/.config/tool.conf".to_string());
 
         let result = render_repo_links("$HOME/repos/test", &link_spec);
 
@@ -643,14 +628,27 @@ mod tests {
     #[test]
     fn test_render_github() {
         let mut items = HashMap::new();
-        let mut repo_spec1 = crate::config::RepoSpec::default();
-        repo_spec1.cargo = vec!["./".to_string()];
-        repo_spec1.link.items.insert("bin/tool1".to_string(), "~/bin/tool1".to_string());
-        repo_spec1.script.items.insert("setup".to_string(), "echo 'Setting up tool1'".to_string());
+        let mut repo_spec1 = crate::config::RepoSpec {
+            cargo: vec!["./".to_string()],
+            ..Default::default()
+        };
+        repo_spec1
+            .link
+            .items
+            .insert("bin/tool1".to_string(), "~/bin/tool1".to_string());
+        repo_spec1
+            .script
+            .items
+            .insert("setup".to_string(), "echo 'Setting up tool1'".to_string());
 
-        let mut repo_spec2 = crate::config::RepoSpec::default();
-        repo_spec2.cargo = vec!["subdir".to_string()];
-        repo_spec2.link.items.insert("bin/tool2".to_string(), "~/bin/tool2".to_string());
+        let mut repo_spec2 = crate::config::RepoSpec {
+            cargo: vec!["subdir".to_string()],
+            ..Default::default()
+        };
+        repo_spec2
+            .link
+            .items
+            .insert("bin/tool2".to_string(), "~/bin/tool2".to_string());
 
         items.insert("user/repo1".to_string(), repo_spec1);
         items.insert("user/repo2".to_string(), repo_spec2);
@@ -733,9 +731,7 @@ mod tests {
 
     #[test]
     fn test_build_script_removes_leading_newline_from_first_section() {
-        let sections = vec![
-            ManifestType::Apt(vec!["package1".to_string()]),
-        ];
+        let sections = vec![ManifestType::Apt(vec!["package1".to_string()])];
         let result = build_script(&sections);
 
         let lines: Vec<&str> = result.lines().collect();
@@ -747,8 +743,14 @@ mod tests {
     #[test]
     fn test_integration_with_repo_nested_scripts() {
         let mut repo_spec = crate::config::RepoSpec::default();
-        repo_spec.script.items.insert("post_install".to_string(), "echo 'Post install script'\nchmod +x ~/bin/tool".to_string());
-        repo_spec.script.items.insert("configure".to_string(), "echo 'Configuration script'\n~/bin/tool --setup".to_string());
+        repo_spec.script.items.insert(
+            "post_install".to_string(),
+            "echo 'Post install script'\nchmod +x ~/bin/tool".to_string(),
+        );
+        repo_spec.script.items.insert(
+            "configure".to_string(),
+            "echo 'Configuration script'\n~/bin/tool --setup".to_string(),
+        );
 
         let mut github_items = HashMap::new();
         github_items.insert("user/repo".to_string(), repo_spec);
