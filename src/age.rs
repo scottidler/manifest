@@ -1,13 +1,45 @@
 // src/age.rs
 
-use age::armor::ArmoredReader;
-use age::{Decryptor, Identity};
+use age::armor::{ArmoredReader, ArmoredWriter, Format};
+use age::{Decryptor, Encryptor, Identity, Recipient};
 use eyre::{Result, WrapErr, eyre};
 use log::error;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+// ============ ENCRYPTION ============
+
+/// Encrypt data to armored age format
+pub fn encrypt(plaintext: &[u8], recipient: &dyn Recipient) -> Result<Vec<u8>> {
+    let encryptor = Encryptor::with_recipients(std::iter::once(recipient))
+        .map_err(|_| eyre!("Failed to create encryptor: no recipients provided"))?;
+    let mut output = vec![];
+    let armor_writer = ArmoredWriter::wrap_output(&mut output, Format::AsciiArmor)?;
+    let mut writer = encryptor.wrap_output(armor_writer)?;
+    writer.write_all(plaintext)?;
+    writer.finish()?.finish()?;
+    Ok(output)
+}
+
+/// Encrypt a file, return armored ciphertext
+pub fn encrypt_file(path: &Path, recipient: &dyn Recipient) -> Result<Vec<u8>> {
+    let plaintext =
+        fs::read(path).wrap_err_with(|| format!("Failed to read file for encryption: {}", path.display()))?;
+    encrypt(&plaintext, recipient)
+}
+
+/// Encrypt from stdin
+pub fn encrypt_stdin(recipient: &dyn Recipient) -> Result<Vec<u8>> {
+    let mut plaintext = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut plaintext)
+        .wrap_err("Failed to read from stdin")?;
+    encrypt(&plaintext, recipient)
+}
+
+// ============ DECRYPTION ============
 
 /// Decrypt armored age data
 pub fn decrypt(ciphertext: &[u8], identity: &dyn Identity) -> Result<Vec<u8>> {
@@ -85,6 +117,110 @@ pub fn load_identity(path: &Path) -> Result<Box<dyn Identity>> {
     }
 
     Err(eyre!("No valid identity found in file: {}", path.display()))
+}
+
+/// Load recipient (public key) from a public key string
+pub fn parse_recipient(public_key: &str) -> Result<Box<dyn Recipient + Send>> {
+    // Try age native public key
+    if let Ok(recipient) = public_key.parse::<age::x25519::Recipient>() {
+        return Ok(Box::new(recipient));
+    }
+
+    // Try SSH public key
+    if let Ok(recipient) = public_key.parse::<age::ssh::Recipient>() {
+        return Ok(Box::new(recipient));
+    }
+
+    Err(eyre!(
+        "Invalid public key format: {}. Expected age or SSH public key.",
+        public_key
+    ))
+}
+
+/// Get public key from an identity (used in Phase 3 --public-key)
+#[allow(dead_code)]
+pub fn get_public_key(identity_path: &Path) -> Result<String> {
+    let content = fs::read_to_string(identity_path)
+        .wrap_err_with(|| format!("Failed to read identity: {}", identity_path.display()))?;
+
+    // Try age native identity
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(identity) = line.parse::<age::x25519::Identity>() {
+            return Ok(identity.to_public().to_string());
+        }
+    }
+
+    // For SSH keys, we need to read the .pub file
+    let pub_path = identity_path.with_extension("pub");
+    if pub_path.exists() {
+        let pub_content = fs::read_to_string(&pub_path)?;
+        return Ok(pub_content.trim().to_string());
+    }
+
+    Err(eyre!(
+        "Could not extract public key from identity: {}",
+        identity_path.display()
+    ))
+}
+
+/// Resolve recipient for encryption
+/// 1. Explicit -r/--recipient argument (public key string)
+/// 2. Public key derived from identity file
+pub fn resolve_recipient(
+    explicit_recipient: Option<&str>,
+    identity_path: Option<&str>,
+) -> Result<Box<dyn Recipient + Send>> {
+    // If explicit recipient provided, use it
+    if let Some(pubkey) = explicit_recipient {
+        return parse_recipient(pubkey);
+    }
+
+    // Otherwise, derive from identity
+    let identity_path = if let Some(path) = identity_path {
+        PathBuf::from(path)
+    } else {
+        // Use default identity path
+        let home = std::env::var("HOME").wrap_err("HOME environment variable not set")?;
+        let candidates = [
+            format!("{}/.config/manifest/identity.txt", home),
+            format!("{}/.ssh/id_ed25519", home),
+            format!("{}/.ssh/id_rsa", home),
+        ];
+
+        candidates
+            .iter()
+            .find(|p| Path::new(p).exists())
+            .map(PathBuf::from)
+            .ok_or_else(|| eyre!("No identity file found for deriving public key"))?
+    };
+
+    // Read identity to get public key
+    let content = fs::read_to_string(&identity_path)?;
+
+    // Try age native identity
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(identity) = line.parse::<age::x25519::Identity>() {
+            return Ok(Box::new(identity.to_public()));
+        }
+    }
+
+    // Try SSH - need the .pub file
+    let pub_path = identity_path.with_extension("pub");
+    if pub_path.exists() {
+        let pub_content = fs::read_to_string(&pub_path)?;
+        return parse_recipient(pub_content.trim());
+    }
+
+    Err(eyre!(
+        "Could not derive recipient from identity: {}",
+        identity_path.display()
+    ))
 }
 
 /// Find identity file using resolution chain:
@@ -201,5 +337,41 @@ mod tests {
         let result = find_age_files(path);
         // If file doesn't exist, should return empty
         assert!(result.is_empty() || result[0].extension().unwrap() == "age");
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        // Generate a test identity
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let plaintext = b"test secret value";
+
+        // Encrypt
+        let ciphertext = encrypt(plaintext, &recipient).unwrap();
+
+        // Verify it's armored
+        let ciphertext_str = String::from_utf8_lossy(&ciphertext);
+        assert!(ciphertext_str.starts_with("-----BEGIN AGE ENCRYPTED FILE-----"));
+
+        // Decrypt
+        let decrypted = decrypt(&ciphertext, &identity).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_parse_recipient_age_key() {
+        // Valid age public key format
+        let identity = age::x25519::Identity::generate();
+        let pubkey = identity.to_public().to_string();
+
+        let result = parse_recipient(&pubkey);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_recipient_invalid() {
+        let result = parse_recipient("invalid-key");
+        assert!(result.is_err());
     }
 }

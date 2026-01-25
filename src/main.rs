@@ -202,11 +202,11 @@ fn handle_age_command(
     encrypt: Option<String>,
     decrypt: Option<String>,
     identity: Option<String>,
-    _recipient: Option<String>,
+    recipient: Option<String>,
     _keygen: bool,
     _public_key: bool,
 ) -> Result<()> {
-    // Phase 1: Only decrypt is implemented
+    // Handle decryption
     if let Some(path) = decrypt {
         let identity_ref = age::resolve_identity(identity.as_deref())?;
         let path = std::path::Path::new(&path);
@@ -215,8 +215,22 @@ fn handle_age_command(
         return Ok(());
     }
 
-    if encrypt.is_some() {
-        return Err(eyre::eyre!("Encryption not yet implemented (Phase 2)"));
+    // Handle encryption
+    if let Some(file_path) = encrypt {
+        let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
+
+        let ciphertext = if file_path == "-" {
+            // Read from stdin
+            age::encrypt_stdin(recipient_box.as_ref())?
+        } else {
+            // Read from file
+            let path = std::path::Path::new(&file_path);
+            age::encrypt_file(path, recipient_box.as_ref())?
+        };
+
+        // Output to stdout
+        std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
+        return Ok(());
     }
 
     Err(eyre::eyre!("No action specified. Use -d to decrypt or -e to encrypt."))
