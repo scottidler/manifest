@@ -90,10 +90,44 @@ pub fn filename_to_var(path: &Path) -> String {
         .replace('-', "_")
 }
 
-/// Escape value for shell assignment (handle quotes, newlines)
+/// Escape value for shell assignment (handle quotes, newlines, special chars)
+/// Uses ANSI-C quoting ($'...') for values with special characters
 pub fn shell_escape(value: &[u8]) -> String {
-    let s = String::from_utf8_lossy(value);
-    s.replace('\'', "'\\''")
+    // Strip trailing newline if present (common for single-value secrets)
+    let value = if value.ends_with(b"\n") { &value[..value.len() - 1] } else { value };
+
+    // Check if valid UTF-8
+    let s = match std::str::from_utf8(value) {
+        Ok(s) => s,
+        Err(_) => {
+            // Non-UTF8: encode as hex
+            let hex: String = value.iter().map(|b| format!("\\x{:02x}", b)).collect();
+            return format!("$'{}'", hex);
+        }
+    };
+
+    // Check if we need special escaping
+    let needs_escape = s.chars().any(|c| matches!(c, '\'' | '\\' | '\n' | '\r' | '\t' | '\0'));
+
+    if needs_escape {
+        // Use ANSI-C quoting
+        let escaped: String = s
+            .chars()
+            .map(|c| match c {
+                '\'' => "\\'".to_string(),
+                '\\' => "\\\\".to_string(),
+                '\n' => "\\n".to_string(),
+                '\r' => "\\r".to_string(),
+                '\t' => "\\t".to_string(),
+                '\0' => "\\0".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+        format!("$'{}'", escaped)
+    } else {
+        // Simple single-quoted string
+        s.to_string()
+    }
 }
 
 /// Load identity from file path
@@ -332,7 +366,13 @@ pub fn render_exports(path: &Path, identity: &dyn Identity) -> String {
         match decrypt_file(&file, identity) {
             Ok(plaintext) => {
                 let escaped = shell_escape(&plaintext);
-                output.push_str(&format!("export {}='{}'\n", var_name, escaped));
+                // shell_escape returns either a plain string (for simple values)
+                // or $'...' format (for values with special chars)
+                if escaped.starts_with("$'") {
+                    output.push_str(&format!("export {}={}\n", var_name, escaped));
+                } else {
+                    output.push_str(&format!("export {}='{}'\n", var_name, escaped));
+                }
             }
             Err(e) => {
                 error!("CRITICAL: failed to decrypt {}: {}", file.display(), e);
@@ -374,7 +414,26 @@ mod tests {
     #[test]
     fn test_shell_escape_single_quotes() {
         let value = b"it's a test";
-        assert_eq!(shell_escape(value), "it'\\''s a test");
+        assert_eq!(shell_escape(value), "$'it\\'s a test'");
+    }
+
+    #[test]
+    fn test_shell_escape_newline() {
+        let value = b"line1\nline2";
+        assert_eq!(shell_escape(value), "$'line1\\nline2'");
+    }
+
+    #[test]
+    fn test_shell_escape_trailing_newline() {
+        // Trailing newlines should be stripped
+        let value = b"secret\n";
+        assert_eq!(shell_escape(value), "secret");
+    }
+
+    #[test]
+    fn test_shell_escape_backslash() {
+        let value = b"path\\to\\file";
+        assert_eq!(shell_escape(value), "$'path\\\\to\\\\file'");
     }
 
     #[test]
