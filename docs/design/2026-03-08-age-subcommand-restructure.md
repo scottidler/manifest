@@ -120,7 +120,7 @@ echo "secret" | manifest age encrypt -
 2. If the argument does not exist and contains `=` → KEY=VAL mode
 3. If the argument does not exist and has no `=` → error (file not found)
 
-Mixed inputs are allowed. Each argument is classified independently, so a single invocation can encrypt both files and KEY=VAL pairs.
+Mixed inputs (files + KEY=VAL) in a single invocation are rejected with an error.
 
 #### Decrypt Subcommand
 

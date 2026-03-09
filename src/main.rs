@@ -250,26 +250,41 @@ fn handle_age_command(
         Some(AgeAction::Encrypt { inputs, output_dir }) => {
             let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
 
+            // Classify inputs and reject mixed modes
+            let mut has_files = false;
+            let mut has_kv = false;
+            let mut has_stdin = false;
             for input in &inputs {
                 if input == "-" {
-                    // Stdin mode
+                    has_stdin = true;
+                } else if Path::new(input).exists() {
+                    has_files = true;
+                } else if input.contains('=') {
+                    has_kv = true;
+                }
+                // else: will error during processing
+            }
+            if (has_files && has_kv) || (has_stdin && (has_files || has_kv)) {
+                return Err(eyre::eyre!(
+                    "Cannot mix file paths, KEY=VAL pairs, and stdin in a single invocation"
+                ));
+            }
+
+            for input in &inputs {
+                if input == "-" {
                     let ciphertext = age::encrypt_stdin(recipient_box.as_ref())?;
                     std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
                 } else if Path::new(input).exists() {
-                    // File mode
                     if inputs.len() == 1 {
-                        // Single file: output to stdout
                         let ciphertext = age::encrypt_file(Path::new(input), recipient_box.as_ref())?;
                         std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
                     } else {
-                        // Multiple files: write to .age files
                         let ciphertext = age::encrypt_file(Path::new(input), recipient_box.as_ref())?;
                         let stem = Path::new(input).file_stem().unwrap_or_default().to_string_lossy();
                         let out_path = Path::new(&output_dir).join(format!("{}.age", stem));
                         std::fs::write(&out_path, &ciphertext)?;
                     }
                 } else if input.contains('=') {
-                    // KEY=VAL mode
                     let (key, val) = input.split_once('=').unwrap();
                     let filename = age::var_to_filename(key);
                     let ciphertext = age::encrypt(val.as_bytes(), recipient_box.as_ref())?;
