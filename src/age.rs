@@ -721,4 +721,66 @@ mod tests {
         let output = render_exports(tmp.path(), &identity);
         assert_eq!(output, "export EMPTY_VAR=''\n");
     }
+
+    #[test]
+    fn test_encrypt_multiple_kv_pairs() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Simulate encrypting multiple KEY=VAL pairs
+        let pairs = vec![("GITHUB_PAT", "ghp_xxxx"), ("API_KEY", "sk-yyyy")];
+        for (key, val) in &pairs {
+            let filename = var_to_filename(key);
+            let ciphertext = encrypt(val.as_bytes(), &recipient).unwrap();
+            std::fs::write(tmp.path().join(&filename), ciphertext).unwrap();
+        }
+
+        // Verify both decrypt correctly
+        let output = render_env(tmp.path(), &identity);
+        assert!(output.contains("GITHUB_PAT=ghp_xxxx"));
+        assert!(output.contains("API_KEY=sk-yyyy"));
+    }
+
+    #[test]
+    fn test_encrypt_multiple_files() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp_src = tempfile::TempDir::new().unwrap();
+        let tmp_out = tempfile::TempDir::new().unwrap();
+
+        // Create source files
+        std::fs::write(tmp_src.path().join("secret1.txt"), b"value1").unwrap();
+        std::fs::write(tmp_src.path().join("secret2.txt"), b"value2").unwrap();
+
+        // Encrypt each file to output dir (simulating multi-file mode)
+        for name in &["secret1.txt", "secret2.txt"] {
+            let path = tmp_src.path().join(name);
+            let ciphertext = encrypt_file(&path, &recipient).unwrap();
+            let stem = Path::new(name).file_stem().unwrap().to_string_lossy();
+            std::fs::write(tmp_out.path().join(format!("{}.age", stem)), ciphertext).unwrap();
+        }
+
+        // Verify both decrypt correctly
+        let output = render_exports(tmp_out.path(), &identity);
+        assert!(output.contains("SECRET1"));
+        assert!(output.contains("SECRET2"));
+        assert!(output.contains("value1"));
+        assert!(output.contains("value2"));
+    }
+
+    #[test]
+    fn test_decrypt_empty_directory() {
+        let identity = age::x25519::Identity::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // No .age files → empty output, no error
+        let output = render_exports(tmp.path(), &identity);
+        assert_eq!(output, "");
+
+        let env_output = render_env(tmp.path(), &identity);
+        assert_eq!(env_output, "");
+    }
 }
