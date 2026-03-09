@@ -111,22 +111,27 @@ pub fn env_escape(value: &[u8]) -> String {
         }
     };
 
-    // Check if quoting is needed (check original string before any escaping)
-    let has_newlines = s.contains('\n');
-    let needs_quoting = has_newlines
+    let needs_quoting = s.starts_with('#')
+        || s.starts_with(';')
         || s.chars()
-            .any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\'' | '\\'))
-        || s.starts_with('#')
-        || s.starts_with(';');
+            .any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\'' | '\\' | '\n'));
 
-    if needs_quoting {
-        // Double-quote with escaping per systemd convention
-        // Order matters: escape backslashes first, then quotes, then newlines
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-        format!("\"{}\"", escaped)
-    } else {
-        s.to_string()
+    if !needs_quoting {
+        return s.to_string();
     }
+
+    let mut escaped = String::with_capacity(s.len() + 2);
+    escaped.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// Escape value for shell assignment (handle quotes, newlines, special chars)
@@ -652,5 +657,68 @@ mod tests {
     #[test]
     fn test_env_escape_double_quote() {
         assert_eq!(env_escape(b"say \"hello\""), "\"say \\\"hello\\\"\"");
+    }
+
+    #[test]
+    fn test_var_to_filename_single_word() {
+        assert_eq!(var_to_filename("TOKEN"), "token.age");
+    }
+
+    #[test]
+    fn test_encrypt_kv_roundtrip() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        // Simulate KEY=VAL encrypt: encrypt value, write to var_to_filename
+        let key = "GITHUB_PAT";
+        let val = b"ghp_xxxx";
+        let filename = var_to_filename(key);
+        assert_eq!(filename, "github-pat.age");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out_path = tmp.path().join(&filename);
+
+        let ciphertext = encrypt(val, &recipient).unwrap();
+        std::fs::write(&out_path, ciphertext).unwrap();
+
+        // Decrypt and verify roundtrip
+        let output = render_exports(tmp.path(), &identity);
+        assert_eq!(output, "export GITHUB_PAT='ghp_xxxx'\n");
+
+        let env_output = render_env(tmp.path(), &identity);
+        assert_eq!(env_output, "GITHUB_PAT=ghp_xxxx\n");
+    }
+
+    #[test]
+    fn test_encrypt_kv_value_with_equals() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        // Value contains = (split on first = only)
+        let input = "API_KEY=sk-ant=xxx=yyy";
+        let (key, val) = input.split_once('=').unwrap();
+        assert_eq!(key, "API_KEY");
+        assert_eq!(val, "sk-ant=xxx=yyy");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let filename = var_to_filename(key);
+        let ciphertext = encrypt(val.as_bytes(), &recipient).unwrap();
+        std::fs::write(tmp.path().join(&filename), ciphertext).unwrap();
+
+        let output = render_env(tmp.path(), &identity);
+        assert_eq!(output, "API_KEY=sk-ant=xxx=yyy\n");
+    }
+
+    #[test]
+    fn test_encrypt_kv_empty_value() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ciphertext = encrypt(b"", &recipient).unwrap();
+        std::fs::write(tmp.path().join("empty-var.age"), ciphertext).unwrap();
+
+        let output = render_exports(tmp.path(), &identity);
+        assert_eq!(output, "export EMPTY_VAR=''\n");
     }
 }
