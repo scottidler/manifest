@@ -612,4 +612,45 @@ mod tests {
     fn test_env_escape_semicolon_start() {
         assert_eq!(env_escape(b";value"), "\";value\"");
     }
+
+    #[test]
+    fn test_render_env_roundtrip() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let secret_path = tmp.path().join("api-key.age");
+
+        let ciphertext = encrypt(b"sk-test123", &recipient).unwrap();
+        std::fs::write(&secret_path, ciphertext).unwrap();
+
+        let output = render_env(tmp.path(), &identity);
+        assert_eq!(output, "API_KEY=sk-test123\n");
+    }
+
+    #[test]
+    fn test_render_exports_roundtrip() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let secret_path = tmp.path().join("api-key.age");
+
+        let ciphertext = encrypt(b"sk-test123", &recipient).unwrap();
+        std::fs::write(&secret_path, ciphertext).unwrap();
+
+        let output = render_exports(tmp.path(), &identity);
+        assert_eq!(output, "export API_KEY='sk-test123'\n");
+    }
+
+    #[test]
+    fn test_env_format_value_with_equals() {
+        // Values containing = should work fine in env format
+        assert_eq!(env_escape(b"sk-ant=xxx=yyy"), "sk-ant=xxx=yyy");
+    }
+
+    #[test]
+    fn test_env_escape_double_quote() {
+        assert_eq!(env_escape(b"say \"hello\""), "\"say \\\"hello\\\"\"");
+    }
 }
