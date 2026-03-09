@@ -90,6 +90,45 @@ pub fn filename_to_var(path: &Path) -> String {
         .replace('-', "_")
 }
 
+/// Convert environment variable name to filename
+/// "CHATGPT_API_KEY" -> "chatgpt-api-key.age"
+pub fn var_to_filename(var_name: &str) -> String {
+    format!("{}.age", var_name.to_lowercase().replace('_', "-"))
+}
+
+/// Escape value for env file format (systemd EnvironmentFile compatible)
+/// Values containing whitespace, #, ", ', or \ are double-quoted with escaping
+pub fn env_escape(value: &[u8]) -> String {
+    // Strip trailing newline if present
+    let value = if value.ends_with(b"\n") { &value[..value.len() - 1] } else { value };
+
+    let s = match std::str::from_utf8(value) {
+        Ok(s) => s,
+        Err(_) => {
+            // Non-UTF8: hex encode, always quote
+            let hex: String = value.iter().map(|b| format!("\\x{:02x}", b)).collect();
+            return format!("\"{}\"", hex);
+        }
+    };
+
+    // Check if quoting is needed (check original string before any escaping)
+    let has_newlines = s.contains('\n');
+    let needs_quoting = has_newlines
+        || s.chars()
+            .any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\'' | '\\'))
+        || s.starts_with('#')
+        || s.starts_with(';');
+
+    if needs_quoting {
+        // Double-quote with escaping per systemd convention
+        // Order matters: escape backslashes first, then quotes, then newlines
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        format!("\"{}\"", escaped)
+    } else {
+        s.to_string()
+    }
+}
+
 /// Escape value for shell assignment (handle quotes, newlines, special chars)
 /// Uses ANSI-C quoting ($'...') for values with special characters
 pub fn shell_escape(value: &[u8]) -> String {
@@ -383,6 +422,45 @@ pub fn render_exports(path: &Path, identity: &dyn Identity) -> String {
     output
 }
 
+/// Decrypt all .age files and format as env file (KEY=val, no export prefix)
+pub fn render_env(path: &Path, identity: &dyn Identity) -> String {
+    let files = find_age_files(path);
+    let mut output = String::new();
+
+    // Check for filename collisions
+    let mut var_names: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+    for file in &files {
+        let var_name = filename_to_var(file);
+        var_names.entry(var_name).or_default().push(file.clone());
+    }
+
+    // Report collisions
+    for (var_name, paths) in &var_names {
+        if paths.len() > 1 {
+            error!(
+                "CRITICAL: Variable name collision for {}: {:?}",
+                var_name,
+                paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    for file in files {
+        let var_name = filename_to_var(&file);
+        match decrypt_file(&file, identity) {
+            Ok(plaintext) => {
+                let escaped = env_escape(&plaintext);
+                output.push_str(&format!("{}={}\n", var_name, escaped));
+            }
+            Err(e) => {
+                error!("CRITICAL: failed to decrypt {}: {}", file.display(), e);
+                output.push_str(&format!("{}=\"manifest age command failed\"\n", var_name));
+            }
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +557,59 @@ mod tests {
     fn test_parse_recipient_invalid() {
         let result = parse_recipient("invalid-key");
         assert!(result.is_err());
+    }
+
+    // var_to_filename tests
+    #[test]
+    fn test_var_to_filename_simple() {
+        assert_eq!(var_to_filename("GITHUB_PAT"), "github-pat.age");
+    }
+
+    #[test]
+    fn test_var_to_filename_multi_word() {
+        assert_eq!(var_to_filename("CHATGPT_API_KEY"), "chatgpt-api-key.age");
+    }
+
+    #[test]
+    fn test_var_to_filename_roundtrip() {
+        let var_name = "FOO_BAR";
+        let filename = var_to_filename(var_name);
+        assert_eq!(filename_to_var(Path::new(&filename)), var_name);
+    }
+
+    // env_escape tests
+    #[test]
+    fn test_env_escape_simple() {
+        assert_eq!(env_escape(b"simple_value"), "simple_value");
+    }
+
+    #[test]
+    fn test_env_escape_with_spaces() {
+        assert_eq!(env_escape(b"value with spaces"), "\"value with spaces\"");
+    }
+
+    #[test]
+    fn test_env_escape_with_hash() {
+        assert_eq!(env_escape(b"#comment-like"), "\"#comment-like\"");
+    }
+
+    #[test]
+    fn test_env_escape_with_quotes() {
+        assert_eq!(env_escape(b"it's a test"), "\"it's a test\"");
+    }
+
+    #[test]
+    fn test_env_escape_trailing_newline() {
+        assert_eq!(env_escape(b"secret\n"), "secret");
+    }
+
+    #[test]
+    fn test_env_escape_embedded_newline() {
+        assert_eq!(env_escape(b"line1\nline2"), "\"line1\\nline2\"");
+    }
+
+    #[test]
+    fn test_env_escape_semicolon_start() {
+        assert_eq!(env_escape(b";value"), "\";value\"");
     }
 }

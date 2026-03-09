@@ -6,7 +6,7 @@ mod config;
 mod fuzzy;
 mod manifest;
 
-use crate::cli::{Cli, Commands};
+use crate::cli::{AgeAction, Cli, Commands, DecryptFormat};
 use crate::config::*;
 use crate::fuzzy::*;
 use crate::manifest::{ManifestType, build_script};
@@ -199,12 +199,11 @@ fn setup_logging() -> Result<()> {
 }
 
 fn handle_age_command(
-    encrypt: Option<String>,
-    decrypt: Option<String>,
     identity: Option<String>,
     recipient: Option<String>,
     keygen: bool,
     public_key: bool,
+    action: Option<AgeAction>,
 ) -> Result<()> {
     // Handle --keygen
     if keygen {
@@ -218,7 +217,6 @@ fn handle_age_command(
         let identity_path = if let Some(path) = &identity {
             std::path::PathBuf::from(path)
         } else {
-            // Use default identity path
             let home = std::env::var("HOME").wrap_err("HOME environment variable not set")?;
             let candidates = [
                 format!("{}/.config/manifest/identity.txt", home),
@@ -238,34 +236,58 @@ fn handle_age_command(
         return Ok(());
     }
 
-    // Handle decryption
-    if let Some(path) = decrypt {
-        let identity_ref = age::resolve_identity(identity.as_deref())?;
-        let path = std::path::Path::new(&path);
-        let output = age::render_exports(path, identity_ref.as_ref());
-        print!("{}", output);
-        return Ok(());
+    match action {
+        Some(AgeAction::Decrypt { path, format }) => {
+            let identity_ref = age::resolve_identity(identity.as_deref())?;
+            let path = std::path::Path::new(&path);
+            let output = match format {
+                DecryptFormat::Export => age::render_exports(path, identity_ref.as_ref()),
+                DecryptFormat::Env => age::render_env(path, identity_ref.as_ref()),
+            };
+            print!("{}", output);
+            Ok(())
+        }
+        Some(AgeAction::Encrypt { inputs, output_dir }) => {
+            let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
+
+            for input in &inputs {
+                if input == "-" {
+                    // Stdin mode
+                    let ciphertext = age::encrypt_stdin(recipient_box.as_ref())?;
+                    std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
+                } else if Path::new(input).exists() {
+                    // File mode
+                    if inputs.len() == 1 {
+                        // Single file: output to stdout
+                        let ciphertext = age::encrypt_file(Path::new(input), recipient_box.as_ref())?;
+                        std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
+                    } else {
+                        // Multiple files: write to .age files
+                        let ciphertext = age::encrypt_file(Path::new(input), recipient_box.as_ref())?;
+                        let stem = Path::new(input).file_stem().unwrap_or_default().to_string_lossy();
+                        let out_path = Path::new(&output_dir).join(format!("{}.age", stem));
+                        std::fs::write(&out_path, &ciphertext)?;
+                    }
+                } else if input.contains('=') {
+                    // KEY=VAL mode
+                    let (key, val) = input.split_once('=').unwrap();
+                    let filename = age::var_to_filename(key);
+                    let ciphertext = age::encrypt(val.as_bytes(), recipient_box.as_ref())?;
+                    let out_path = Path::new(&output_dir).join(&filename);
+                    std::fs::write(&out_path, &ciphertext)?;
+                } else {
+                    return Err(eyre::eyre!(
+                        "Input '{}' is not an existing file and not a KEY=VAL pair",
+                        input
+                    ));
+                }
+            }
+            Ok(())
+        }
+        None => Err(eyre::eyre!(
+            "No action specified. Use 'encrypt' or 'decrypt' subcommand."
+        )),
     }
-
-    // Handle encryption
-    if let Some(file_path) = encrypt {
-        let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
-
-        let ciphertext = if file_path == "-" {
-            // Read from stdin
-            age::encrypt_stdin(recipient_box.as_ref())?
-        } else {
-            // Read from file
-            let path = std::path::Path::new(&file_path);
-            age::encrypt_file(path, recipient_box.as_ref())?
-        };
-
-        // Output to stdout
-        std::io::Write::write_all(&mut std::io::stdout(), &ciphertext)?;
-        return Ok(());
-    }
-
-    Err(eyre::eyre!("No action specified. Use -d to decrypt or -e to encrypt."))
 }
 
 fn main() -> Result<()> {
@@ -274,24 +296,16 @@ fn main() -> Result<()> {
     setup_logging()?;
 
     // Handle subcommands first
-    if let Some(command) = &cli.command {
+    if let Some(command) = cli.command {
         match command {
             Commands::Age {
-                encrypt,
-                decrypt,
                 identity,
                 recipient,
                 keygen,
                 public_key,
+                action,
             } => {
-                return handle_age_command(
-                    encrypt.clone(),
-                    decrypt.clone(),
-                    identity.clone(),
-                    recipient.clone(),
-                    *keygen,
-                    *public_key,
-                );
+                return handle_age_command(identity, recipient, keygen, public_key, action);
             }
         }
     }

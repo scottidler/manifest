@@ -203,14 +203,6 @@ pub struct Cli {
 pub enum Commands {
     /// Encrypt and decrypt secrets using age encryption
     Age {
-        /// Encrypt a file (output to stdout)
-        #[arg(short = 'e', long = "encrypt", value_name = "FILE")]
-        encrypt: Option<String>,
-
-        /// Decrypt .age files in PATH, output shell exports
-        #[arg(short = 'd', long = "decrypt", value_name = "PATH", default_missing_value = ".", num_args = 0..=1)]
-        decrypt: Option<String>,
-
         /// Identity file for encryption/decryption
         #[arg(short = 'i', long = "identity", value_name = "FILE")]
         identity: Option<String>,
@@ -226,7 +218,41 @@ pub enum Commands {
         /// Show public key from identity
         #[arg(long = "public-key")]
         public_key: bool,
+
+        #[command(subcommand)]
+        action: Option<AgeAction>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgeAction {
+    /// Encrypt files or key-value pairs
+    Encrypt {
+        /// Files or KEY=VAL pairs to encrypt
+        #[arg(required = true, num_args = 1..)]
+        inputs: Vec<String>,
+
+        /// Output directory for generated .age files (KEY=VAL and multi-file mode)
+        #[arg(short = 'o', long = "output-dir", default_value = ".")]
+        output_dir: String,
+    },
+
+    /// Decrypt .age files and output key-value pairs
+    Decrypt {
+        /// Path to .age file or directory containing .age files
+        #[arg(default_value = ".")]
+        path: String,
+
+        /// Output format: export (default) or env
+        #[arg(short = 'f', long = "format", default_value = "export")]
+        format: DecryptFormat,
+    },
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum DecryptFormat {
+    Export,
+    Env,
 }
 
 impl Cli {
