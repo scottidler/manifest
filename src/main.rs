@@ -43,11 +43,11 @@ fn sorted_map(map: &HashMap<String, String>) -> HashMap<String, String> {
     sorted
 }
 
-fn linkspec_to_vec(spec: &config::LinkSpec, cli: &Cli) -> Result<Vec<String>> {
+fn linkspec_to_vec(spec: &config::LinkSpec, repo_root: &Path, cli: &Cli) -> Result<Vec<String>> {
     debug!("linkspec_to_vec: starting with spec = {:?}", spec);
     let mut lines = Vec::new();
-    let cwd = Path::new(&cli.path);
-    debug!("linkspec_to_vec: current working directory = {:?}", cwd);
+    let cwd = repo_root;
+    debug!("linkspec_to_vec: repo root = {:?}", cwd);
 
     let home = if cli.home.is_empty() {
         std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
@@ -118,8 +118,9 @@ fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
     merged
 }
 
-fn ensure_manifest_functions() -> Result<()> {
-    ensure_manifest_functions_with_home_and_bin(None, "bin")
+fn ensure_manifest_functions(repo_root: &Path) -> Result<()> {
+    let bin_dir = repo_root.join("bin");
+    ensure_manifest_functions_with_home_and_bin(None, &bin_dir.to_string_lossy())
 }
 
 fn ensure_manifest_functions_with_home_and_bin(home_override: Option<&str>, bin_dir: &str) -> Result<()> {
@@ -327,12 +328,16 @@ fn main() -> Result<()> {
 
     info!("Starting manifest generation");
 
-    ensure_manifest_functions().wrap_err("Failed to ensure manifest function files")?;
-
     debug!("Parsed CLI arguments: {:?}", cli);
 
-    let manifest_spec = ManifestSpec::load_from_standard_locations(Some(cli.config.clone()))?;
+    let (manifest_spec, config_path) = ManifestSpec::load_from_standard_locations(cli.config.clone())?;
     debug!("Loaded manifest spec: {:?}", manifest_spec);
+    debug!("Config path: {:?}", config_path);
+
+    let repo_root = config::discover_repo_root(&config_path).unwrap_or_else(|_| PathBuf::from(&cli.path));
+    debug!("Resolved repo root: {:?}", repo_root);
+
+    ensure_manifest_functions(&repo_root).wrap_err("Failed to ensure manifest function files")?;
 
     let complete = !cli.any_section_specified();
     debug!("Complete mode = {}", complete);
@@ -340,7 +345,7 @@ fn main() -> Result<()> {
     let mut sections: Vec<ManifestType> = Vec::new();
 
     if (complete || !cli.link.is_empty()) && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive) {
-        let lines = linkspec_to_vec(&manifest_spec.link, &cli)?;
+        let lines = linkspec_to_vec(&manifest_spec.link, &repo_root, &cli)?;
         let filtered = fuzzy(lines).include(&cli.link);
         debug!("Adding Link section with {} lines", filtered.len());
         sections.push(ManifestType::Link(sorted_vec(&filtered)));

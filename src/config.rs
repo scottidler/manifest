@@ -1,11 +1,12 @@
 // src/config.rs
 
-use eyre::Result;
+use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 use serde_yaml::from_reader;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
     let parsed: ManifestSpec = from_reader(r)?;
@@ -152,24 +153,27 @@ pub struct GitCryptSpec {
 }
 
 impl ManifestSpec {
-    pub fn load_from_standard_locations(config_path: Option<String>) -> Result<Self> {
+    pub fn load_from_standard_locations(config_path: Option<String>) -> Result<(Self, PathBuf)> {
         let config_file = match config_path {
             Some(path) => PathBuf::from(path),
             None => Self::find_config_file()?,
         };
 
-        if config_file.exists() {
+        let spec = if config_file.exists() {
             let file = std::fs::File::open(&config_file)?;
-            load_manifest_spec(file)
+            load_manifest_spec(file)?
         } else {
-            Ok(ManifestSpec::default())
-        }
+            ManifestSpec::default()
+        };
+
+        Ok((spec, config_file))
     }
 
     fn find_config_file() -> Result<PathBuf> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let candidates = vec![
             PathBuf::from(format!("{}/.config/manifest/manifest.yml", home)),
+            PathBuf::from("./HOME/.config/manifest/manifest.yml"),
             PathBuf::from("./manifest.yml"),
         ];
 
@@ -182,6 +186,41 @@ impl ManifestSpec {
         // Return primary location even if it doesn't exist
         Ok(PathBuf::from(format!("{}/.config/manifest/manifest.yml", home)))
     }
+}
+
+/// Discover the dotfiles repo root by resolving the config file's symlink
+/// and walking up the ancestry to find a directory named `HOME`.
+///
+/// Falls back to searching for a sibling `HOME/` directory relative to the
+/// config file's ancestors (covers bootstrap and non-symlinked cases).
+pub fn discover_repo_root(config_path: &Path) -> Result<PathBuf> {
+    let real_path = std::fs::canonicalize(config_path)?;
+
+    // Walk ancestors looking for a component named "HOME"
+    for ancestor in real_path.ancestors() {
+        if ancestor.file_name() == Some(OsStr::new("HOME")) {
+            return ancestor
+                .parent()
+                .map(|p| p.to_path_buf())
+                .ok_or_else(|| eyre!("HOME directory has no parent"));
+        }
+    }
+
+    // Fallback: config is not inside a HOME/ tree (or not a symlink).
+    // Check if a HOME/ directory exists as a sibling or ancestor-sibling.
+    let config_dir = real_path
+        .parent()
+        .ok_or_else(|| eyre!("config has no parent directory"))?;
+    for ancestor in config_dir.ancestors() {
+        if ancestor.join("HOME").is_dir() {
+            return Ok(ancestor.to_path_buf());
+        }
+    }
+
+    Err(eyre!(
+        "could not discover repo root: no HOME/ directory found in ancestry of {:?}",
+        real_path
+    ))
 }
 
 #[cfg(test)]
@@ -808,5 +847,74 @@ script:
         let docker_script = spec.script.items.get("docker").unwrap();
         assert!(docker_script.contains("Installing Docker"));
         assert!(docker_script.contains("sudo usermod -aG docker $USER"));
+    }
+
+    #[test]
+    fn test_discover_repo_root_from_config_inside_home_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path().join("dotfiles");
+        let config_dir = repo_root.join("HOME/.config/manifest");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_file = config_dir.join("manifest.yml");
+        std::fs::write(&config_file, "verbose: true\n").unwrap();
+
+        let result = discover_repo_root(&config_file).unwrap();
+        assert_eq!(result, std::fs::canonicalize(&repo_root).unwrap());
+    }
+
+    #[test]
+    fn test_discover_repo_root_via_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path().join("dotfiles");
+        let config_dir = repo_root.join("HOME/.config/manifest");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let real_config = config_dir.join("manifest.yml");
+        std::fs::write(&real_config, "verbose: true\n").unwrap();
+
+        // Create a symlink pointing to the real config
+        let symlink_dir = tmp.path().join("xdg_config/manifest");
+        std::fs::create_dir_all(&symlink_dir).unwrap();
+        let symlink_path = symlink_dir.join("manifest.yml");
+        std::os::unix::fs::symlink(&real_config, &symlink_path).unwrap();
+
+        let result = discover_repo_root(&symlink_path).unwrap();
+        assert_eq!(result, std::fs::canonicalize(&repo_root).unwrap());
+    }
+
+    #[test]
+    fn test_discover_repo_root_fallback_sibling_home() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_root = tmp.path().join("dotfiles");
+        // Config is NOT inside HOME/ but HOME/ exists as a sibling
+        let config_dir = repo_root.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(repo_root.join("HOME")).unwrap();
+        let config_file = config_dir.join("manifest.yml");
+        std::fs::write(&config_file, "verbose: true\n").unwrap();
+
+        let result = discover_repo_root(&config_file).unwrap();
+        assert_eq!(result, std::fs::canonicalize(&repo_root).unwrap());
+    }
+
+    #[test]
+    fn test_discover_repo_root_no_home_dir_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().join("some/random/path");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_file = config_dir.join("manifest.yml");
+        std::fs::write(&config_file, "verbose: true\n").unwrap();
+
+        let result = discover_repo_root(&config_file);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_standard_locations_returns_config_path() {
+        // Test with an explicit config path
+        let result = ManifestSpec::load_from_standard_locations(Some("manifest.yml".to_string()));
+        assert!(result.is_ok());
+        let (spec, path) = result.unwrap();
+        assert!(spec.verbose);
+        assert_eq!(path, PathBuf::from("manifest.yml"));
     }
 }

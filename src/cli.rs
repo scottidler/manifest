@@ -47,13 +47,8 @@ fn get_pkgmgr() -> String {
     after_help = "Logs are written to: ~/.local/share/manifest/logs/manifest.log"
 )]
 pub struct Cli {
-    #[arg(
-        short = 'C',
-        long = "config",
-        default_value = "manifest.yml",
-        help = "Path to the manifest YAML file"
-    )]
-    pub config: String,
+    #[arg(short = 'C', long = "config", help = "Path to the manifest YAML file")]
+    pub config: Option<String>,
 
     #[arg(short = 'H', long = "home", default_value = "", help = "Specify HOME if not current")]
     pub home: String,
