@@ -359,26 +359,40 @@ pub fn resolve_identity(explicit_path: Option<&str>) -> Result<Box<dyn Identity>
     }
 
     let home = std::env::var("HOME").wrap_err("HOME environment variable not set")?;
+    let primary = format!("{}/.config/manifest/identity.txt", home);
 
-    let candidates = [
-        format!("{}/.config/manifest/identity.txt", home),
+    if Path::new(&primary).exists() {
+        return load_identity(Path::new(&primary));
+    }
+
+    // Primary identity file is missing - warn and try SSH key fallbacks
+    let fallbacks = [
         format!("{}/.ssh/id_ed25519", home),
         format!("{}/.ssh/id_rsa", home),
     ];
 
-    for candidate in &candidates {
-        let path = Path::new(candidate);
+    for fallback in &fallbacks {
+        let path = Path::new(fallback);
         if path.exists() {
-            match load_identity(path) {
-                Ok(identity) => return Ok(identity),
-                Err(_) => continue,
+            if let Ok(identity) = load_identity(path) {
+                eprintln!(
+                    "WARNING: {} not found, falling back to {}\n\
+                     Secrets encrypted with a dedicated age identity will fail to decrypt.\n\
+                     To fix: restore identity.txt from your password manager, or run `manifest age --keygen` to generate a new one.\n\
+                     IMPORTANT: back up identity.txt in a password manager - if lost, all age-encrypted secrets are unrecoverable.",
+                    primary, fallback
+                );
+                return Ok(identity);
             }
         }
     }
 
     Err(eyre!(
-        "No identity file found. Tried:\n  {}\n\nHint: run `manifest age --keygen` to generate a new identity",
-        candidates.join("\n  ")
+        "No identity file found. Tried:\n  {}\n  {}\n\n\
+         To fix: restore identity.txt from your password manager, or run `manifest age --keygen` to generate a new one.\n\
+         IMPORTANT: back up identity.txt in a password manager - if lost, all age-encrypted secrets are unrecoverable.",
+        primary,
+        fallbacks.join("\n  ")
     ))
 }
 
