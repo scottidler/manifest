@@ -65,6 +65,13 @@ fn linkspec_to_vec(spec: &config::LinkSpec, repo_root: &Path, cli: &Cli) -> Resu
                 for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
                     let path = entry.path();
                     if path.is_file() {
+                        // Skip files whose source path falls under a dirs: entry - those
+                        // subtrees are covered by a directory-level symlink instead.
+                        let rel_from_cwd = path.strip_prefix(cwd).unwrap_or(path);
+                        let rel_str = rel_from_cwd.to_string_lossy();
+                        if spec.dirs.keys().any(|d| rel_str.starts_with(d.as_str())) {
+                            continue;
+                        }
                         let rel = path.strip_prefix(&src_dir).unwrap_or(path);
                         let dst_path = Path::new(dst).join(rel);
                         let mut final_dst = dst_path.to_string_lossy().to_string();
@@ -88,6 +95,16 @@ fn linkspec_to_vec(spec: &config::LinkSpec, repo_root: &Path, cli: &Cli) -> Resu
             lines.push(format!("{} {}", source_str, final_dst));
         }
     }
+    // Process dirs: each entry produces a single directory-level symlink.
+    // WalkDir is bypassed entirely - the source path goes straight to linker.
+    for (src, dst) in &spec.dirs {
+        let source_path = cwd.join(src);
+        let source_str = source_path.to_string_lossy().to_string();
+        let final_dst = dst.replace("$HOME", &home);
+        lines.push(format!("{} {}", source_str, final_dst));
+        debug!("linkspec_to_vec: dirs entry {} -> {}", source_str, final_dst);
+    }
+
     debug!("linkspec_to_vec: generated {} lines", lines.len());
     Ok(lines)
 }
@@ -344,7 +361,7 @@ fn main() -> Result<()> {
 
     let mut sections: Vec<ManifestType> = Vec::new();
 
-    if (complete || !cli.link.is_empty()) && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive) {
+    if (complete || !cli.link.is_empty()) && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive || !manifest_spec.link.dirs.is_empty()) {
         let lines = linkspec_to_vec(&manifest_spec.link, &repo_root, &cli)?;
         let filtered = fuzzy(lines).include(&cli.link);
         debug!("Adding Link section with {} lines", filtered.len());
@@ -462,6 +479,67 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn make_cli(home: &str) -> Cli {
+        Cli {
+            config: None,
+            home: home.to_string(),
+            pkgmgr: "deb".to_string(),
+            link: vec![],
+            ppa: vec![],
+            apt: vec![],
+            dnf: vec![],
+            npm: vec![],
+            pip3: vec![],
+            pipx: vec![],
+            flatpak: vec![],
+            cargo: vec![],
+            github: vec![],
+            git_crypt: vec![],
+            script: vec![],
+            path: ".".to_string(),
+            command: None,
+        }
+    }
+
+    #[test]
+    fn test_linkspec_to_vec_dirs_produces_one_line() {
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().to_path_buf();
+        let src_dir = repo_root.join("HOME/.claude/skills");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("file1.txt"), "a").unwrap();
+        fs::write(src_dir.join("file2.txt"), "b").unwrap();
+
+        let mut dirs = HashMap::new();
+        dirs.insert("HOME/.claude/skills".to_string(), "$HOME/.claude/skills".to_string());
+        let spec = config::LinkSpec { recursive: false, dirs, items: HashMap::new() };
+
+        let cli = make_cli("/test/home");
+        let lines = linkspec_to_vec(&spec, &repo_root, &cli).unwrap();
+
+        // Must be exactly 1 line - the directory pair, not one per file inside
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("/test/home/.claude/skills"));
+    }
+
+    #[test]
+    fn test_linkspec_to_vec_dirs_only_produces_output() {
+        // A LinkSpec with only dirs (no items, recursive: false) must still
+        // produce output - guards against the gating-condition bug.
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().to_path_buf();
+
+        let mut dirs = HashMap::new();
+        dirs.insert("some/dir".to_string(), "$HOME/some/dir".to_string());
+        let spec = config::LinkSpec { recursive: false, dirs, items: HashMap::new() };
+
+        let cli = make_cli("/test/home");
+        let lines = linkspec_to_vec(&spec, &repo_root, &cli).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("/test/home/some/dir"));
+    }
 
     fn setup_test_env() -> (TempDir, String) {
         let temp_home = TempDir::new().unwrap();
