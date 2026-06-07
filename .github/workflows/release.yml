@@ -9,6 +9,9 @@ on:
 env:
   RUST_VERSION: 1.96.0
   CARGO_TERM_COLOR: always
+  # Opt JS-based actions (e.g. softprops/action-gh-release) into the Node.js 24
+  # runtime ahead of the 2026-06-16 default switch; Node.js 20 is deprecated.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
