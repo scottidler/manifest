@@ -135,68 +135,57 @@ fn merge_pkg_dnf(spec: &ManifestSpec) -> Vec<String> {
     merged
 }
 
-fn ensure_manifest_functions(repo_root: &Path) -> Result<()> {
-    let bin_dir = repo_root.join("bin");
-    ensure_manifest_functions_with_home_and_bin(None, &bin_dir.to_string_lossy())
+fn ensure_manifest_functions() -> Result<()> {
+    ensure_manifest_functions_with_home(None)?;
+    Ok(())
 }
 
-fn ensure_manifest_functions_with_home_and_bin(home_override: Option<&str>, bin_dir: &str) -> Result<()> {
-    let home_dir = match home_override {
-        Some(home) => home.to_string(),
-        None => std::env::var("HOME").map_err(|e| eyre::eyre!("HOME environment variable not set: {}", e))?,
+/// Write the embedded shell helpers to the manifest data dir, refreshing any that
+/// are absent or whose on-disk content has drifted from the embedded copy. The
+/// binary is the single source of truth, so edits to `bin/*.sh` reach the file the
+/// generated script sources. Returns the filenames written this call.
+///
+/// `home_override` is for tests: `Some(home)` resolves the data dir to
+/// `<home>/.local/share` deterministically; `None` (production) uses
+/// `config::xdg_data_dir()`, which honors `$XDG_DATA_HOME` and falls back to
+/// `$HOME/.local/share` on every platform (Linux and macOS alike).
+fn ensure_manifest_functions_with_home(home_override: Option<&str>) -> Result<Vec<String>> {
+    debug!("ensure_manifest_functions_with_home: home_override={:?}", home_override);
+    let data_dir = match home_override {
+        Some(home) => PathBuf::from(home).join(".local").join("share"),
+        None => config::xdg_data_dir(),
     };
-
-    let manifest_dir = format!("{}/.local/share/manifest", home_dir);
-
-    if !std::path::Path::new(bin_dir).exists() {
-        return Ok(());
-    }
-
-    let bin_entries = std::fs::read_dir(bin_dir)?;
-    let mut shell_files = Vec::new();
-
-    for entry in bin_entries {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(extension) = path.extension()
-            && extension == "sh"
-            && let Some(filename) = path.file_name()
-        {
-            shell_files.push(filename.to_string_lossy().to_string());
-        }
-    }
-
-    if shell_files.is_empty() {
-        return Ok(());
-    }
-
+    let manifest_dir = data_dir.join("manifest");
     std::fs::create_dir_all(&manifest_dir)?;
 
-    let mut installed_files = Vec::new();
-
-    for filename in shell_files {
-        let src_path = format!("{}/{}", bin_dir, filename);
-        let dest_path = format!("{}/{}", manifest_dir, filename);
-
-        if !std::path::Path::new(&dest_path).exists() {
-            let content = std::fs::read_to_string(&src_path)?;
-            std::fs::write(&dest_path, content)?;
-            installed_files.push(filename);
+    let mut written = Vec::new();
+    for (name, content) in manifest::HELPERS {
+        let dest = manifest_dir.join(name);
+        let needs_write = match std::fs::read_to_string(&dest) {
+            Ok(existing) => existing != *content,
+            Err(_) => true,
+        };
+        if needs_write {
+            std::fs::write(&dest, content)?;
+            written.push((*name).to_string());
         }
     }
 
-    if !installed_files.is_empty() {
-        println!("Installed manifest shell functions: {}", installed_files.join(", "));
+    debug!(
+        "ensure_manifest_functions_with_home: wrote {:?} to {:?}",
+        written, manifest_dir
+    );
+    if !written.is_empty() {
+        println!("Installed manifest shell functions: {}", written.join(", "));
     }
 
-    Ok(())
+    Ok(written)
 }
 
 fn setup_logging() -> Result<()> {
     use env_logger::Target;
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_dir = PathBuf::from(format!("{}/.local/share/manifest/logs", home));
+    let log_dir = config::xdg_data_dir().join("manifest").join("logs");
 
     std::fs::create_dir_all(&log_dir)?;
     let log_file_path = log_dir.join("manifest.log");
@@ -354,14 +343,16 @@ fn main() -> Result<()> {
     let repo_root = config::discover_repo_root(&config_path).unwrap_or_else(|_| PathBuf::from(&cli.path));
     debug!("Resolved repo root: {:?}", repo_root);
 
-    ensure_manifest_functions(&repo_root).wrap_err("Failed to ensure manifest function files")?;
+    ensure_manifest_functions().wrap_err("Failed to ensure manifest function files")?;
 
     let complete = !cli.any_section_specified();
     debug!("Complete mode = {}", complete);
 
     let mut sections: Vec<ManifestType> = Vec::new();
 
-    if (complete || !cli.link.is_empty()) && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive || !manifest_spec.link.dirs.is_empty()) {
+    if (complete || !cli.link.is_empty())
+        && (!manifest_spec.link.items.is_empty() || manifest_spec.link.recursive || !manifest_spec.link.dirs.is_empty())
+    {
         let lines = linkspec_to_vec(&manifest_spec.link, &repo_root, &cli)?;
         let filtered = fuzzy(lines).include(&cli.link);
         debug!("Adding Link section with {} lines", filtered.len());
@@ -513,7 +504,11 @@ mod tests {
 
         let mut dirs = HashMap::new();
         dirs.insert("HOME/.claude/skills".to_string(), "$HOME/.claude/skills".to_string());
-        let spec = config::LinkSpec { recursive: false, dirs, items: HashMap::new() };
+        let spec = config::LinkSpec {
+            recursive: false,
+            dirs,
+            items: HashMap::new(),
+        };
 
         let cli = make_cli("/test/home");
         let lines = linkspec_to_vec(&spec, &repo_root, &cli).unwrap();
@@ -532,7 +527,11 @@ mod tests {
 
         let mut dirs = HashMap::new();
         dirs.insert("some/dir".to_string(), "$HOME/some/dir".to_string());
-        let spec = config::LinkSpec { recursive: false, dirs, items: HashMap::new() };
+        let spec = config::LinkSpec {
+            recursive: false,
+            dirs,
+            items: HashMap::new(),
+        };
 
         let cli = make_cli("/test/home");
         let lines = linkspec_to_vec(&spec, &repo_root, &cli).unwrap();
@@ -545,19 +544,6 @@ mod tests {
         let temp_home = TempDir::new().unwrap();
         let home_path = temp_home.path().to_string_lossy().to_string();
         (temp_home, home_path)
-    }
-
-    fn create_bin_dir_with_files(files: &[(&str, &str)]) -> TempDir {
-        let temp_bin = TempDir::new().unwrap();
-        let bin_dir = temp_bin.path().join("bin");
-        fs::create_dir(&bin_dir).unwrap();
-
-        for (filename, content) in files {
-            let file_path = bin_dir.join(filename);
-            fs::write(file_path, content).unwrap();
-        }
-
-        temp_bin
     }
 
     fn manifest_dir_path(home: &str) -> String {
@@ -575,162 +561,63 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_manifest_functions_creates_directory() {
-        let (_temp_home, home_path) = setup_test_env();
-        let temp_bin = create_bin_dir_with_files(&[("test.sh", "echo 'test'")]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        let manifest_dir = manifest_dir_path(&home_path);
-        assert!(std::path::Path::new(&manifest_dir).exists());
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_installs_single_file() {
-        let (_temp_home, home_path) = setup_test_env();
-        let test_content = "test_function() {\n  echo 'Hello from test'\n}";
-        let temp_bin = create_bin_dir_with_files(&[("test.sh", test_content)]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        assert!(file_exists_in_manifest_dir(&home_path, "test.sh"));
-
-        let installed_content = read_file_from_manifest_dir(&home_path, "test.sh");
-        assert_eq!(installed_content, test_content);
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_installs_multiple_files() {
+    fn test_ensure_manifest_functions_writes_embedded_when_absent() {
         let (_temp_home, home_path) = setup_test_env();
 
-        let linker_content = "linker() {\n  echo 'linker function'\n}";
-        let latest_content = "latest() {\n  echo 'latest function'\n}";
-        let helper_content = "helper() {\n  echo 'helper function'\n}";
+        let written = ensure_manifest_functions_with_home(Some(&home_path)).unwrap();
 
-        let temp_bin = create_bin_dir_with_files(&[
-            ("linker.sh", linker_content),
-            ("latest.sh", latest_content),
-            ("helper.sh", helper_content),
-        ]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
+        // Both embedded helpers are delivered on a clean data dir.
+        assert!(written.contains(&"linker.sh".to_string()));
+        assert!(written.contains(&"latest.sh".to_string()));
         assert!(file_exists_in_manifest_dir(&home_path, "linker.sh"));
         assert!(file_exists_in_manifest_dir(&home_path, "latest.sh"));
-        assert!(file_exists_in_manifest_dir(&home_path, "helper.sh"));
-
-        assert_eq!(read_file_from_manifest_dir(&home_path, "linker.sh"), linker_content);
-        assert_eq!(read_file_from_manifest_dir(&home_path, "latest.sh"), latest_content);
-        assert_eq!(read_file_from_manifest_dir(&home_path, "helper.sh"), helper_content);
+        // Delivered content is the binary's embedded source of truth.
+        assert_eq!(
+            read_file_from_manifest_dir(&home_path, "linker.sh"),
+            crate::manifest::LINKER
+        );
+        assert_eq!(
+            read_file_from_manifest_dir(&home_path, "latest.sh"),
+            crate::manifest::LATEST
+        );
     }
 
     #[test]
-    fn test_ensure_manifest_functions_skips_existing_files() {
+    fn test_ensure_manifest_functions_refreshes_when_content_differs() {
         let (_temp_home, home_path) = setup_test_env();
 
-        let original_content = "original_function() {\n  echo 'original'\n}";
-        let new_content = "new_function() {\n  echo 'new'\n}";
-
-        let temp_bin = create_bin_dir_with_files(&[("test.sh", new_content)]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-        assert!(file_exists_in_manifest_dir(&home_path, "test.sh"));
-
-        let manifest_file_path = format!("{}/test.sh", manifest_dir_path(&home_path));
-        fs::write(&manifest_file_path, original_content).unwrap();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        let content = read_file_from_manifest_dir(&home_path, "test.sh");
-        assert_eq!(content, original_content);
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_installs_only_missing_files() {
-        let (_temp_home, home_path) = setup_test_env();
-
-        let existing_content = "existing() {\n  echo 'exists'\n}";
-        let new_content = "new() {\n  echo 'new'\n}";
-
-        let temp_bin = create_bin_dir_with_files(&[("existing.sh", existing_content), ("new.sh", new_content)]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
+        // Pre-seed a stale linker.sh (mimics the real-world Jun-2025 orphan).
         let manifest_dir = manifest_dir_path(&home_path);
         fs::create_dir_all(&manifest_dir).unwrap();
-        fs::write(format!("{}/existing.sh", manifest_dir), existing_content).unwrap();
+        fs::write(format!("{}/linker.sh", manifest_dir), "stale() { :; }\n").unwrap();
 
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
+        let written = ensure_manifest_functions_with_home(Some(&home_path)).unwrap();
 
-        assert!(file_exists_in_manifest_dir(&home_path, "existing.sh"));
-        assert!(file_exists_in_manifest_dir(&home_path, "new.sh"));
-
-        assert_eq!(read_file_from_manifest_dir(&home_path, "existing.sh"), existing_content);
-        assert_eq!(read_file_from_manifest_dir(&home_path, "new.sh"), new_content);
+        // The drifted helper is rewritten to the embedded copy.
+        assert!(written.contains(&"linker.sh".to_string()));
+        assert_eq!(
+            read_file_from_manifest_dir(&home_path, "linker.sh"),
+            crate::manifest::LINKER
+        );
     }
 
     #[test]
-    fn test_ensure_manifest_functions_ignores_non_sh_files() {
+    fn test_ensure_manifest_functions_leaves_identical_untouched() {
         let (_temp_home, home_path) = setup_test_env();
 
-        let temp_bin = create_bin_dir_with_files(&[
-            ("script.sh", "echo 'shell script'"),
-            ("readme.txt", "This is a readme"),
-            ("config.json", "{}"),
-            ("another.sh", "echo 'another shell script'"),
-        ]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
+        // First call delivers everything.
+        ensure_manifest_functions_with_home(Some(&home_path)).unwrap();
+        // Second call: nothing drifted, so nothing is rewritten.
+        let written = ensure_manifest_functions_with_home(Some(&home_path)).unwrap();
 
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        assert!(file_exists_in_manifest_dir(&home_path, "script.sh"));
-        assert!(file_exists_in_manifest_dir(&home_path, "another.sh"));
-        assert!(!file_exists_in_manifest_dir(&home_path, "readme.txt"));
-        assert!(!file_exists_in_manifest_dir(&home_path, "config.json"));
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_handles_missing_bin_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let (_temp_home, home_path) = setup_test_env();
-
-        let non_existent_bin = temp_dir.path().join("non_existent_bin").to_string_lossy().to_string();
-
-        let result = ensure_manifest_functions_with_home_and_bin(Some(&home_path), &non_existent_bin);
-        assert!(result.is_ok());
-
-        let manifest_dir = manifest_dir_path(&home_path);
-        assert!(!std::path::Path::new(&manifest_dir).exists());
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_handles_empty_bin_directory() {
-        let (_temp_home, home_path) = setup_test_env();
-        let temp_bin = TempDir::new().unwrap();
-        let bin_dir = temp_bin.path().join("bin");
-        fs::create_dir(&bin_dir).unwrap();
-        let bin_path = bin_dir.to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        let manifest_dir = manifest_dir_path(&home_path);
-        assert!(!std::path::Path::new(&manifest_dir).exists());
-    }
-
-    #[test]
-    fn test_ensure_manifest_functions_with_special_characters_in_filename() {
-        let (_temp_home, home_path) = setup_test_env();
-
-        let content = "special() {\n  echo 'special chars'\n}";
-        let temp_bin = create_bin_dir_with_files(&[("test-file_v1.2.sh", content)]);
-        let bin_path = temp_bin.path().join("bin").to_string_lossy().to_string();
-
-        ensure_manifest_functions_with_home_and_bin(Some(&home_path), &bin_path).unwrap();
-
-        assert!(file_exists_in_manifest_dir(&home_path, "test-file_v1.2.sh"));
-        assert_eq!(read_file_from_manifest_dir(&home_path, "test-file_v1.2.sh"), content);
+        assert!(written.is_empty());
+        assert_eq!(
+            read_file_from_manifest_dir(&home_path, "linker.sh"),
+            crate::manifest::LINKER
+        );
+        assert_eq!(
+            read_file_from_manifest_dir(&home_path, "latest.sh"),
+            crate::manifest::LATEST
+        );
     }
 }

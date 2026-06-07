@@ -53,6 +53,13 @@ pub struct ManifestSpec {
 pub struct LinkSpec {
     #[serde(default)]
     pub recursive: bool,
+    // WARNING: "dirs" is now a reserved key in link: blocks. A manifest entry
+    // using "dirs" as a plain symlink source (e.g. `dirs: $HOME/.dirs`) will
+    // fail to parse because serde expects a mapping here, not a string. The
+    // correct fix is a custom Deserialize with type-based discrimination; that
+    // complexity is deferred. See docs/design/2026-04-17-link-dirs-subfield.md.
+    #[serde(default)]
+    pub dirs: HashMap<String, String>,
     #[serde(flatten)]
     pub items: HashMap<String, String>,
 }
@@ -223,10 +230,56 @@ pub fn discover_repo_root(config_path: &Path) -> Result<PathBuf> {
     ))
 }
 
+/// Resolve the XDG data directory, honoring `$XDG_DATA_HOME` and falling back to
+/// `$HOME/.local/share`. This uses the XDG layout on *every* platform - Linux and
+/// macOS alike - and deliberately never calls the `dirs` crate's
+/// `data_local_dir()`, which on macOS returns `~/Library/Application Support` and
+/// would diverge from the `${XDG_DATA_HOME:-$HOME/.local/share}` path the
+/// generated script sources its helper functions from.
+pub fn xdg_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+        let path = PathBuf::from(&dir);
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".local").join("share")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    // Serialize env-var-touching tests to prevent parallel races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_xdg_data_dir_honors_env_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("XDG_DATA_HOME").ok();
+
+        // Honors an absolute $XDG_DATA_HOME (same behavior on Linux and macOS).
+        let dir = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };
+        assert_eq!(xdg_data_dir(), dir.path());
+
+        // A relative $XDG_DATA_HOME is ignored; falls back to $HOME/.local/share
+        // on every platform (never ~/Library/Application Support on macOS).
+        unsafe { std::env::set_var("XDG_DATA_HOME", "relative/not/absolute") };
+        assert!(xdg_data_dir().ends_with(".local/share"));
+
+        // Unset also falls back to $HOME/.local/share.
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        assert!(xdg_data_dir().ends_with(".local/share"));
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+    }
 
     #[test]
     fn test_manifest_spec_default() {
@@ -267,10 +320,47 @@ HOME: $HOME
     fn test_link_spec_serialization() {
         let mut items = HashMap::new();
         items.insert("src".to_string(), "dst".to_string());
-        let spec = LinkSpec { recursive: true, items };
+        let spec = LinkSpec {
+            recursive: true,
+            dirs: HashMap::new(),
+            items,
+        };
         let yaml = serde_yaml::to_string(&spec).unwrap();
         assert!(yaml.contains("recursive: true"));
         assert!(yaml.contains("src: dst"));
+    }
+
+    #[test]
+    fn test_link_spec_dirs_deserialization() {
+        let yaml = r#"
+recursive: true
+HOME: $HOME
+dirs:
+  HOME/.claude/skills: $HOME/.claude/skills
+"#;
+        let spec: LinkSpec = serde_yaml::from_str(yaml).unwrap();
+        assert!(spec.recursive);
+        assert_eq!(spec.items.len(), 1);
+        assert_eq!(spec.items.get("HOME"), Some(&"$HOME".to_string()));
+        assert_eq!(spec.dirs.len(), 1);
+        assert_eq!(
+            spec.dirs.get("HOME/.claude/skills"),
+            Some(&"$HOME/.claude/skills".to_string())
+        );
+        // dirs must not bleed into items
+        assert!(!spec.items.contains_key("dirs"));
+    }
+
+    #[test]
+    fn test_link_spec_dirs_no_bleed_into_items() {
+        let yaml = r#"
+dirs:
+  HOME/.claude/skills: $HOME/.claude/skills
+  HOME/.config/nvim: $HOME/.config/nvim
+"#;
+        let spec: LinkSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.dirs.len(), 2);
+        assert!(spec.items.is_empty());
     }
 
     #[test]
@@ -675,40 +765,6 @@ script:
     }
 
     #[test]
-    fn test_load_manifest_spec_from_actual_file() {
-        let file = std::fs::File::open("manifest.yml").expect("manifest.yml should exist");
-        let reader = std::io::BufReader::new(file);
-        let spec = load_manifest_spec(reader).expect("Should parse manifest.yml successfully");
-
-        assert!(spec.verbose);
-        assert!(!spec.errors);
-
-        assert!(!spec.ppa.items.is_empty());
-        assert!(!spec.pkg.items.is_empty());
-        assert!(!spec.apt.items.is_empty());
-        assert!(!spec.dnf.items.is_empty());
-        assert!(!spec.npm.items.is_empty());
-        assert!(!spec.pip3.items.is_empty());
-        assert!(!spec.pip3.distutils.is_empty());
-        assert!(!spec.pipx.items.is_empty());
-        assert!(!spec.flatpak.items.is_empty());
-        assert!(!spec.cargo.items.is_empty());
-        assert!(!spec.github.items.is_empty());
-        assert!(!spec.script.items.is_empty());
-
-        assert!(spec.pkg.items.contains(&"jq".to_string()));
-        assert!(spec.pkg.items.contains(&"vim".to_string()));
-        assert!(spec.cargo.items.contains(&"bat".to_string()));
-        assert!(spec.cargo.items.contains(&"ripgrep".to_string()));
-
-        assert!(spec.github.items.contains_key("scottidler/aka"));
-        assert!(spec.github.items.contains_key("scottidler/nvim"));
-
-        assert!(spec.script.items.contains_key("rust"));
-        assert!(spec.script.items.contains_key("docker"));
-    }
-
-    #[test]
     fn test_empty_specs_serialization() {
         let spec = ManifestSpec::default();
         let yaml = serde_yaml::to_string(&spec).unwrap();
@@ -910,11 +966,17 @@ script:
 
     #[test]
     fn test_load_from_standard_locations_returns_config_path() {
-        // Test with an explicit config path
-        let result = ManifestSpec::load_from_standard_locations(Some("manifest.yml".to_string()));
+        // Explicit config path: write a temp manifest and load it directly.
+        // The repo no longer bundles a manifest.yml (the real one lives in
+        // scottidler/dotfiles), so this test must be self-contained.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_file = tmp.path().join("manifest.yml");
+        std::fs::write(&config_file, "verbose: true\n").unwrap();
+
+        let result = ManifestSpec::load_from_standard_locations(Some(config_file.to_string_lossy().into_owned()));
         assert!(result.is_ok());
         let (spec, path) = result.unwrap();
         assert!(spec.verbose);
-        assert_eq!(path, PathBuf::from("manifest.yml"));
+        assert_eq!(path, config_file);
     }
 }

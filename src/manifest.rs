@@ -19,8 +19,13 @@ pub enum ManifestType {
     Script(HashMap<String, String>),
 }
 
-static LINKER: &str = include_str!("scripts/linker.sh");
-static LATEST: &str = include_str!("scripts/latest.sh");
+pub static LINKER: &str = include_str!("../bin/linker.sh");
+pub static LATEST: &str = include_str!("../bin/latest.sh");
+
+/// Embedded shell helpers: (filename in the data dir, file contents). The binary
+/// is the single source of truth; `ensure_manifest_functions` writes these out and
+/// refreshes them when they drift, so edits to `bin/*.sh` actually take effect.
+pub const HELPERS: &[(&str, &str)] = &[("linker.sh", LINKER), ("latest.sh", LATEST)];
 
 impl ManifestType {
     pub fn functions(&self) -> String {
@@ -292,10 +297,10 @@ pub fn build_script(sections: &[ManifestType]) -> String {
     }
 
     if needs_linker {
-        script.push_str(". $HOME/.local/share/manifest/linker.sh\n");
+        script.push_str(". \"${XDG_DATA_HOME:-$HOME/.local/share}/manifest/linker.sh\"\n");
     }
     if needs_latest {
-        script.push_str(". $HOME/.local/share/manifest/latest.sh\n");
+        script.push_str(". \"${XDG_DATA_HOME:-$HOME/.local/share}/manifest/latest.sh\"\n");
     }
     if needs_linker || needs_latest {
         script.push('\n');
@@ -709,8 +714,8 @@ mod tests {
         assert!(result.contains("#!/bin/bash"));
         assert!(result.contains("# generated file by manifest"));
 
-        assert!(result.contains(". $HOME/.local/share/manifest/linker.sh"));
-        assert!(result.contains(". $HOME/.local/share/manifest/latest.sh"));
+        assert!(result.contains(". \"${XDG_DATA_HOME:-$HOME/.local/share}/manifest/linker.sh\""));
+        assert!(result.contains(". \"${XDG_DATA_HOME:-$HOME/.local/share}/manifest/latest.sh\""));
 
         assert!(result.contains("echo \"links:\""));
         assert!(result.contains("echo \"scripts:\""));
@@ -725,7 +730,9 @@ mod tests {
         ];
         let result = build_script(&sections);
 
-        let linker_source_count = result.matches(". $HOME/.local/share/manifest/linker.sh").count();
+        let linker_source_count = result
+            .matches(". \"${XDG_DATA_HOME:-$HOME/.local/share}/manifest/linker.sh\"")
+            .count();
         assert_eq!(linker_source_count, 1);
     }
 

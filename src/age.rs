@@ -366,24 +366,21 @@ pub fn resolve_identity(explicit_path: Option<&str>) -> Result<Box<dyn Identity>
     }
 
     // Primary identity file is missing - warn and try SSH key fallbacks
-    let fallbacks = [
-        format!("{}/.ssh/id_ed25519", home),
-        format!("{}/.ssh/id_rsa", home),
-    ];
+    let fallbacks = [format!("{}/.ssh/id_ed25519", home), format!("{}/.ssh/id_rsa", home)];
 
     for fallback in &fallbacks {
         let path = Path::new(fallback);
-        if path.exists() {
-            if let Ok(identity) = load_identity(path) {
-                eprintln!(
-                    "WARNING: {} not found, falling back to {}\n\
-                     Secrets encrypted with a dedicated age identity will fail to decrypt.\n\
-                     To fix: restore identity.txt from your password manager, or run `manifest age --keygen` to generate a new one.\n\
-                     IMPORTANT: back up identity.txt in a password manager - if lost, all age-encrypted secrets are unrecoverable.",
-                    primary, fallback
-                );
-                return Ok(identity);
-            }
+        if path.exists()
+            && let Ok(identity) = load_identity(path)
+        {
+            eprintln!(
+                "WARNING: {} not found, falling back to {}\n\
+                 Secrets encrypted with a dedicated age identity will fail to decrypt.\n\
+                 To fix: restore identity.txt from your password manager, or run `manifest age --keygen` to generate a new one.\n\
+                 IMPORTANT: back up identity.txt in a password manager - if lost, all age-encrypted secrets are unrecoverable.",
+                primary, fallback
+            );
+            return Ok(identity);
         }
     }
 

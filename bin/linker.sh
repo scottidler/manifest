@@ -10,6 +10,12 @@ linker() {
     echo "removing broken link $link"
     unlink "$link"
   fi
+  # Guard: ln -s src existing_dir silently nests the symlink inside the directory
+  # instead of replacing it. Catch this and abort rather than corrupt the tree.
+  if [ -d "$link" ] && [ ! -L "$link" ]; then
+    echo "ERROR: $link is a real directory; remove it before manifest can create a directory symlink here" >&2
+    return 1
+  fi
   if [ -f "$link" ]; then
     echo "[exists] $link"
   else
