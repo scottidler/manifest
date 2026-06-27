@@ -409,6 +409,14 @@ fn main() -> Result<()> {
         }
     }
 
+    if complete || !cli.uv_tool.is_empty() {
+        let uv_tool_items = fuzzy(manifest_spec.uv_tool.items.clone()).include(&cli.uv_tool);
+        if !uv_tool_items.is_empty() {
+            debug!("Adding UVTool section with {} items", uv_tool_items.len());
+            sections.push(ManifestType::UVTool(sorted_vec(&uv_tool_items)));
+        }
+    }
+
     if complete || !cli.flatpak.is_empty() {
         let flatpak_items = fuzzy(manifest_spec.flatpak.items.clone()).include(&cli.flatpak);
         if !flatpak_items.is_empty() {
@@ -483,6 +491,7 @@ mod tests {
             npm: vec![],
             pip3: vec![],
             pipx: vec![],
+            uv_tool: vec![],
             flatpak: vec![],
             cargo: vec![],
             github: vec![],

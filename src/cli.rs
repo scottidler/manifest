@@ -133,6 +133,15 @@ pub struct Cli {
     pub pipx: Vec<String>,
 
     #[arg(
+        long = "uv-tool",
+        num_args = 0..,
+        default_missing_value = "*",
+        action = ArgAction::Append,
+        help = "Specify list of glob patterns to match uv-tool items"
+    )]
+    pub uv_tool: Vec<String>,
+
+    #[arg(
         short = 'f',
         long = "flatpak",
         num_args = 0..,

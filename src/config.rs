@@ -37,6 +37,9 @@ pub struct ManifestSpec {
     #[serde(default)]
     pub pipx: PipxSpec,
     #[serde(default)]
+    #[serde(rename = "uv-tool")]
+    pub uv_tool: UVToolSpec,
+    #[serde(default)]
     pub flatpak: FlatpakSpec,
     #[serde(default)]
     pub cargo: CargoSpec,
@@ -104,6 +107,12 @@ pub struct Pip3Spec {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PipxSpec {
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct UVToolSpec {
     #[serde(default)]
     pub items: Vec<String>,
 }

@@ -12,6 +12,7 @@ pub enum ManifestType {
     Npm(Vec<String>),
     Pip3(Vec<String>),
     Pipx(Vec<String>),
+    UVTool(Vec<String>),
     Flatpak(Vec<String>),
     Cargo(Vec<String>),
     Github(HashMap<String, RepoSpec>, String),
@@ -78,7 +79,12 @@ sudo -H pip3 install --upgrade pip setuptools"#;
             }
             ManifestType::Pipx(items) => {
                 let header = r#"echo "pipx:""#;
-                let block = r#"pipx install "$pkg""#;
+                let block = r#"pipx install "$file""#;
+                render_heredoc(header, block, items)
+            }
+            ManifestType::UVTool(items) => {
+                let header = r#"echo "uv-tool:""#;
+                let block = r#"uv tool install "$file""#;
                 render_heredoc(header, block, items)
             }
             ManifestType::Flatpak(items) => {
@@ -414,9 +420,22 @@ mod tests {
 
         assert!(rendered.contains("echo \"pipx:\""));
         assert!(rendered.contains("while read -r file link; do"));
-        assert!(rendered.contains("pipx install \"$pkg\""));
+        assert!(rendered.contains("pipx install \"$file\""));
         assert!(rendered.contains("doit"));
         assert!(rendered.contains("mypy"));
+    }
+
+    #[test]
+    fn test_manifest_type_uv_tool_render() {
+        let items = vec!["docling".to_string(), "yt-dlp".to_string()];
+        let manifest_type = ManifestType::UVTool(items);
+        let rendered = manifest_type.render();
+
+        assert!(rendered.contains("echo \"uv-tool:\""));
+        assert!(rendered.contains("while read -r file link; do"));
+        assert!(rendered.contains("uv tool install \"$file\""));
+        assert!(rendered.contains("docling"));
+        assert!(rendered.contains("yt-dlp"));
     }
 
     #[test]
