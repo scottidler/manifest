@@ -205,6 +205,52 @@ fn setup_logging() -> Result<()> {
     Ok(())
 }
 
+/// Resolve the output directory for `--name`/`--paste` new-mode paths.
+///
+/// Resolution order (highest priority first):
+/// 1. `-o DIR` if given explicitly.
+/// 2. `secrets-store` from the loaded `ManifestSpec` (tilde-expanded).
+/// 3. Neither set -> `eyre!` with a fix-it message.
+///
+/// Config is loaded **lazily** here - only when `-o` was not provided - so a
+/// missing or malformed `manifest.yml` cannot affect `--keygen`, `--public-key`,
+/// `decrypt`, or any path where `-o` was given explicitly. This matches the
+/// constraint from CRITICAL #3 in the design doc (do not reorder the global load).
+///
+/// A `secrets-store` path that does not exist yet is passed through; the
+/// refuse-to-invent guard in `encrypt_named` will reject it at write time.
+fn resolve_new_output_dir(output_dir: Option<&PathBuf>) -> Result<PathBuf> {
+    debug!("resolve_new_output_dir: output_dir={:?}", output_dir);
+    if let Some(dir) = output_dir {
+        debug!("resolve_new_output_dir: using explicit -o dir={}", dir.display());
+        return Ok(dir.clone());
+    }
+
+    // Lazy config load: discover and parse manifest.yml only now.
+    // Mirror how main.rs:~439 calls load_from_standard_locations(None) for the
+    // global load path, but swallow load errors as a friendly "no output dir" message
+    // so that a missing manifest.yml cannot break the other age subpaths.
+    match ManifestSpec::load_from_standard_locations(None) {
+        Ok((spec, config_path)) => {
+            debug!("resolve_new_output_dir: loaded config from {:?}", config_path);
+            if let Some(store) = spec.secrets_store {
+                debug!("resolve_new_output_dir: using secrets-store={}", store.display());
+                return Ok(store);
+            }
+        }
+        Err(e) => {
+            debug!(
+                "resolve_new_output_dir: config load failed ({}); no secrets-store available",
+                e
+            );
+        }
+    }
+
+    Err(eyre::eyre!(
+        "no output directory: pass -o DIR or set secrets-store in manifest.yml"
+    ))
+}
+
 fn handle_age_command(
     identity: Option<String>,
     recipient: Option<String>,
@@ -313,14 +359,12 @@ fn handle_age_command(
                 // Strip a single trailing newline (matches clipboard semantics).
                 let plaintext = age::strip_trailing_newline(plaintext);
 
-                // Resolve the output directory: -o DIR, or error.
-                // Phase 5 will insert the secrets-store tier before the error.
-                let out_dir = match output_dir {
-                    Some(ref dir) => dir.clone(),
-                    None => {
-                        return Err(eyre::eyre!("no output directory: pass -o DIR"));
-                    }
-                };
+                // Resolve output dir: -o DIR > secrets-store (lazy config load) > error.
+                // Config is loaded lazily here - only when -o was not given - so that
+                // missing/malformed manifest.yml cannot break --keygen, --public-key,
+                // decrypt, or -o-explicit encrypt paths. The global config load at
+                // main.rs:~439 is not reordered.
+                let out_dir = resolve_new_output_dir(output_dir.as_ref())?;
 
                 let written =
                     age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
@@ -336,14 +380,8 @@ fn handle_age_command(
                 // already strips a single trailing newline and errors on empty.
                 let plaintext = age::read_clipboard()?;
 
-                // Resolve the output directory: -o DIR, or error.
-                // Phase 5 will insert the secrets-store tier before the error.
-                let out_dir = match output_dir {
-                    Some(ref dir) => dir.clone(),
-                    None => {
-                        return Err(eyre::eyre!("no output directory: pass -o DIR"));
-                    }
-                };
+                // Resolve output dir: -o DIR > secrets-store (lazy config load) > error.
+                let out_dir = resolve_new_output_dir(output_dir.as_ref())?;
 
                 let written =
                     age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
@@ -391,10 +429,20 @@ fn handle_age_command(
                     }
                 } else if input.contains('=') {
                     let (key, val) = input.split_once('=').unwrap();
-                    let filename = age::var_to_filename(key);
-                    let ciphertext = age::encrypt(val.as_bytes(), recipient_box.as_ref())?;
-                    let out_path = legacy_output_dir.join(&filename);
-                    std::fs::write(&out_path, &ciphertext)?;
+                    // Route KEY=VAL through encrypt_named to gain: atomic temp-write +
+                    // sync_all + round-trip verify + --force overwrite guard + validate_name
+                    // + refuse-to-invent. Behavior change: an existing <key>.age without
+                    // --force now errors instead of silently clobbering (deliberate per the
+                    // output-behavior matrix). Output dir stays -o or "." (secrets-store is
+                    // NOT applied here) to avoid silently relocating existing KEY=VAL scripts.
+                    age::encrypt_named(
+                        key,
+                        val.as_bytes(),
+                        recipient_box.as_ref(),
+                        identity_path,
+                        &legacy_output_dir,
+                        force,
+                    )?;
                 } else {
                     return Err(eyre::eyre!(
                         "Input '{}' is not an existing file and not a KEY=VAL pair",

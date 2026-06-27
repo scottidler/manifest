@@ -1,6 +1,7 @@
 // src/config.rs
 
 use eyre::{Result, eyre};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_yaml::from_reader;
 use std::collections::HashMap;
@@ -8,8 +9,35 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Expand a leading `~` in a path to the home directory.
+///
+/// `PathBuf` deserialization does not expand `~`, and `serde_yaml`'s `from_reader`
+/// is a bare parse with no post-processing. This helper is intentionally minimal:
+/// it only expands a leading `~/` or a lone `~`, matching the common config
+/// convention, and falls back to the unexpanded string if `HOME` is unset.
+pub(crate) fn expand_tilde(path: PathBuf) -> PathBuf {
+    debug!("expand_tilde: path={:?}", path);
+    let s = path.to_string_lossy();
+    if s.starts_with("~/") || s == "~" {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let rest = &s[1..];
+        let expanded = PathBuf::from(format!("{}{}", home, rest));
+        debug!("expand_tilde: expanded to {:?}", expanded);
+        expanded
+    } else {
+        path
+    }
+}
+
 pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
-    let parsed: ManifestSpec = from_reader(r)?;
+    debug!("load_manifest_spec: parsing YAML");
+    let mut parsed: ManifestSpec = from_reader(r)?;
+    // Expand ~ in secrets_store after deserialization: PathBuf does not expand
+    // it and from_reader has no post-processing hook.
+    if let Some(p) = parsed.secrets_store.take() {
+        parsed.secrets_store = Some(expand_tilde(p));
+    }
+    debug!("load_manifest_spec: secrets_store={:?}", parsed.secrets_store);
     Ok(parsed)
 }
 
@@ -50,6 +78,18 @@ pub struct ManifestSpec {
     pub git_crypt: GitCryptSpec,
     #[serde(default)]
     pub script: ScriptSpec,
+
+    /// Optional path to the secrets store directory. Used as the fallback output
+    /// directory for `--name`/`--paste` when `-o DIR` is not given. Not applied to
+    /// legacy positional modes (KEY=VAL, file, stdin) to avoid silently relocating
+    /// existing scripts. A leading `~` is expanded to `$HOME` after deserialization
+    /// since `PathBuf` serde does not perform tilde expansion.
+    ///
+    /// Config key uses the explicit rename because `ManifestSpec` has no container
+    /// `rename_all`; other kebab fields (e.g. `uv-tool`, `git-crypt`) follow the
+    /// same per-field `#[serde(rename)]` pattern.
+    #[serde(default, rename = "secrets-store")]
+    pub secrets_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -264,6 +304,101 @@ mod tests {
 
     // Serialize env-var-touching tests to prevent parallel races.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ---- expand_tilde ----
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("HOME").ok();
+
+        unsafe { std::env::set_var("HOME", "/home/testuser") };
+
+        let expanded = expand_tilde(PathBuf::from("~/secrets"));
+        assert_eq!(expanded, PathBuf::from("/home/testuser/secrets"));
+
+        let expanded_nested = expand_tilde(PathBuf::from("~/repos/scottidler/secrets/.secrets"));
+        assert_eq!(
+            expanded_nested,
+            PathBuf::from("/home/testuser/repos/scottidler/secrets/.secrets")
+        );
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn test_expand_tilde_no_tilde() {
+        // Absolute paths and relative paths without ~ are returned as-is.
+        let abs = expand_tilde(PathBuf::from("/absolute/path"));
+        assert_eq!(abs, PathBuf::from("/absolute/path"));
+
+        let rel = expand_tilde(PathBuf::from("relative/path"));
+        assert_eq!(rel, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_expand_tilde_lone_tilde() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("HOME").ok();
+
+        unsafe { std::env::set_var("HOME", "/home/testuser") };
+
+        let expanded = expand_tilde(PathBuf::from("~"));
+        assert_eq!(expanded, PathBuf::from("/home/testuser"));
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    // ---- secrets-store deserialization + tilde expansion ----
+
+    #[test]
+    fn test_secrets_store_deserialization_tilde_expanded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("HOME").ok();
+
+        unsafe { std::env::set_var("HOME", "/home/testuser") };
+
+        let yaml = "secrets-store: ~/repos/scottidler/secrets/.secrets\n";
+        let spec: ManifestSpec = serde_yaml::from_str(yaml).unwrap();
+        // Raw deserialize gives the unexpanded path; load_manifest_spec expands it.
+        // Here we test via load_manifest_spec to confirm the full pipeline.
+        let spec_expanded = load_manifest_spec(yaml.as_bytes()).unwrap();
+        assert_eq!(
+            spec_expanded.secrets_store,
+            Some(PathBuf::from("/home/testuser/repos/scottidler/secrets/.secrets"))
+        );
+        // The raw deserialize (without our expansion) would have kept the tilde.
+        // Confirm that serde does NOT expand it on its own.
+        assert_eq!(
+            spec.secrets_store,
+            Some(PathBuf::from("~/repos/scottidler/secrets/.secrets"))
+        );
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn test_secrets_store_absent_defaults_to_none() {
+        let yaml = "verbose: true\n";
+        let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
+        assert!(spec.secrets_store.is_none());
+    }
+
+    #[test]
+    fn test_secrets_store_absolute_path_unchanged() {
+        let yaml = "secrets-store: /absolute/secrets/path\n";
+        let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
+        assert_eq!(spec.secrets_store, Some(PathBuf::from("/absolute/secrets/path")));
+    }
 
     #[test]
     fn test_xdg_data_dir_honors_env_and_falls_back() {
