@@ -4,10 +4,14 @@ use age::armor::{ArmoredReader, ArmoredWriter, Format};
 use age::secrecy::ExposeSecret;
 use age::{Decryptor, Encryptor, Identity, Recipient};
 use eyre::{Result, WrapErr, eyre};
-use log::error;
+use log::{debug, error, warn};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use walkdir::WalkDir;
 
 // ============ ENCRYPTION ============
@@ -215,6 +219,292 @@ pub fn parse_recipient(public_key: &str) -> Result<Box<dyn Recipient + Send>> {
         public_key
     ))
 }
+
+// ============ CLIPBOARD ============
+
+// NOTE (Phase 2 of 7): these clipboard-read functions are implemented here but
+// are not yet wired into the CLI. `--paste` is wired in Phase 4, which is when
+// `read_clipboard` gains its production call site and this transitional allow is
+// removed. Per rust.md, dead-code is tolerated only across an active transition
+// like this phased rollout, and must be cleaned up before the feature is done.
+#[allow(dead_code)]
+mod clipboard {
+    use super::*;
+
+    /// Wall-clock timeout for a single clipboard read tool invocation. A clipboard
+    /// tool can hang indefinitely (e.g. waiting on a dead Wayland compositor), so
+    /// each candidate is bounded by this.
+    const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Maximum number of bytes captured from the clipboard. A pathological clipboard
+    /// could hold many MB; a secret value is small, so cap the capture and error
+    /// rather than buffer unbounded output.
+    const CLIPBOARD_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+    /// A read-only clipboard tool candidate: the program plus its read-only args.
+    pub(crate) struct ClipboardTool {
+        program: &'static str,
+        args: &'static [&'static str],
+    }
+
+    /// Check whether a program is resolvable on PATH (mirrors `check_hash` in cli.rs).
+    fn command_exists(program: &str) -> bool {
+        debug!("command_exists: checking for program={}", program);
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {}", program))
+            .output();
+        match output {
+            Ok(o) => {
+                let found = !o.stdout.is_empty();
+                debug!("command_exists: program={} found={}", program, found);
+                found
+            }
+            Err(e) => {
+                warn!("command_exists: error checking {}: {}", program, e);
+                false
+            }
+        }
+    }
+
+    /// Strip a single trailing `\n` or `\r\n` from `bytes`. Pure and unit-testable.
+    ///
+    /// Strips at most one trailing newline; does not touch interior newlines,
+    /// trailing spaces/tabs, or multiple trailing newlines beyond the first.
+    pub(crate) fn strip_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        }
+        bytes
+    }
+
+    /// Session-ordered read-only clipboard tool candidates.
+    ///
+    /// Prefers the tool matching the live session: Wayland (`$WAYLAND_DISPLAY`),
+    /// then X11 (`$DISPLAY`), then macOS. Presence on PATH is checked at call time;
+    /// this only fixes the *preference order*. Returns the candidates to try, in
+    /// order. An empty vec means the session is headless (no display, not macOS).
+    pub(crate) fn clipboard_read_candidates() -> Vec<ClipboardTool> {
+        let wayland = ClipboardTool {
+            program: "wl-paste",
+            args: &["-n"],
+        };
+        let xclip = ClipboardTool {
+            program: "xclip",
+            args: &["-selection", "clipboard", "-o"],
+        };
+        let xsel = ClipboardTool {
+            program: "xsel",
+            args: &["-b", "-o"],
+        };
+        let pbpaste = ClipboardTool {
+            program: "pbpaste",
+            args: &[],
+        };
+
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_x11 = std::env::var_os("DISPLAY").is_some();
+        let is_macos = cfg!(target_os = "macos");
+
+        if has_wayland {
+            debug!("clipboard_read_candidates: session=wayland");
+            vec![wayland, xclip, xsel]
+        } else if has_x11 {
+            debug!("clipboard_read_candidates: session=x11");
+            vec![xclip, xsel, wayland]
+        } else if is_macos {
+            debug!("clipboard_read_candidates: session=macos");
+            vec![pbpaste]
+        } else {
+            debug!("clipboard_read_candidates: session=headless");
+            vec![]
+        }
+    }
+
+    /// Result of running a single clipboard tool.
+    enum ToolOutcome {
+        /// Tool exited zero; captured stdout bytes.
+        Ok(Vec<u8>),
+        /// Tool ran but exited non-zero; carries the stderr for diagnostics.
+        NonZero(String),
+        /// Tool exceeded the wall-clock timeout.
+        Timeout,
+        /// Tool produced more than CLIPBOARD_MAX_BYTES.
+        TooLarge,
+        /// Tool could not be spawned/run at all.
+        SpawnError(String),
+    }
+
+    /// Run a single clipboard tool read-only, bounded by a wall-clock timeout and a
+    /// byte cap. Never writes the clipboard.
+    fn run_clipboard_tool(tool: &ClipboardTool) -> ToolOutcome {
+        debug!("run_clipboard_tool: program={} args={:?}", tool.program, tool.args);
+        let child = Command::new(tool.program)
+            .args(tool.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("run_clipboard_tool: spawn failed program={} error={}", tool.program, e);
+                return ToolOutcome::SpawnError(e.to_string());
+            }
+        };
+
+        // Wait for completion on a worker thread so the parent can enforce a
+        // wall-clock timeout. The worker reads stdout/stderr to completion (these
+        // tools write a single buffer of clipboard contents, not a stream).
+        let (tx, rx) = mpsc::channel();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let waiter = thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            if let Some(mut so) = stdout {
+                let _ = so.read_to_end(&mut out);
+            }
+            if let Some(mut se) = stderr {
+                let _ = se.read_to_end(&mut err);
+            }
+            let status = child.wait();
+            let _ = tx.send((status, out, err));
+        });
+
+        match rx.recv_timeout(CLIPBOARD_READ_TIMEOUT) {
+            Ok((status, out, err)) => {
+                let _ = waiter.join();
+                let status = match status {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("run_clipboard_tool: wait failed program={} error={}", tool.program, e);
+                        return ToolOutcome::SpawnError(e.to_string());
+                    }
+                };
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&err).trim().to_string();
+                    debug!(
+                        "run_clipboard_tool: program={} exited non-zero stderr_len={}",
+                        tool.program,
+                        stderr.len()
+                    );
+                    return ToolOutcome::NonZero(stderr);
+                }
+                if out.len() > CLIPBOARD_MAX_BYTES {
+                    warn!(
+                        "run_clipboard_tool: program={} produced bytes={} exceeding cap={}",
+                        tool.program,
+                        out.len(),
+                        CLIPBOARD_MAX_BYTES
+                    );
+                    return ToolOutcome::TooLarge;
+                }
+                debug!("run_clipboard_tool: program={} ok bytes={}", tool.program, out.len());
+                ToolOutcome::Ok(out)
+            }
+            Err(_) => {
+                // Timed out. The worker thread is detached; the child keeps running
+                // but the parent stops waiting. We do not read its output.
+                warn!("run_clipboard_tool: program={} timed out", tool.program);
+                ToolOutcome::Timeout
+            }
+        }
+    }
+
+    /// Read the system clipboard read-only and return the secret bytes.
+    ///
+    /// Selection is session-aware with runtime fall-through: the tool matching the
+    /// live session is preferred, but a non-zero exit falls through to the next
+    /// *installed* candidate. A single trailing newline is stripped. Errors if no
+    /// tool is installed, if all installed tools fail, if the session is headless,
+    /// or if the clipboard is empty after stripping. Never writes the clipboard,
+    /// and never logs the bytes (only the chosen tool and the byte length).
+    pub(crate) fn read_clipboard() -> Result<Vec<u8>> {
+        debug!("read_clipboard: reading system clipboard");
+        let candidates = clipboard_read_candidates();
+        if candidates.is_empty() {
+            return Err(eyre!(
+                "no clipboard available: neither $WAYLAND_DISPLAY nor $DISPLAY is set and this is not macOS. \
+             Set --paste only in a graphical session, or pipe the value via --name."
+            ));
+        }
+
+        let mut tried: Vec<&str> = Vec::new();
+        let mut last_stderr: Option<String> = None;
+
+        for tool in &candidates {
+            if !command_exists(tool.program) {
+                debug!("read_clipboard: skipping uninstalled tool={}", tool.program);
+                continue;
+            }
+            tried.push(tool.program);
+            match run_clipboard_tool(tool) {
+                ToolOutcome::Ok(bytes) => {
+                    let bytes = strip_trailing_newline(bytes);
+                    if bytes.is_empty() {
+                        debug!("read_clipboard: tool={} returned empty after strip", tool.program);
+                        return Err(eyre!(
+                            "clipboard is empty (read via {}); copy a value and retry",
+                            tool.program
+                        ));
+                    }
+                    debug!("read_clipboard: tool={} bytes={}", tool.program, bytes.len());
+                    return Ok(bytes);
+                }
+                ToolOutcome::NonZero(stderr) => {
+                    // Fall through to the next installed candidate.
+                    last_stderr = Some(stderr);
+                    continue;
+                }
+                ToolOutcome::Timeout => {
+                    return Err(eyre!(
+                        "clipboard read via {} timed out after {}s",
+                        tool.program,
+                        CLIPBOARD_READ_TIMEOUT.as_secs()
+                    ));
+                }
+                ToolOutcome::TooLarge => {
+                    return Err(eyre!(
+                        "clipboard contents via {} exceed the {} byte cap",
+                        tool.program,
+                        CLIPBOARD_MAX_BYTES
+                    ));
+                }
+                ToolOutcome::SpawnError(e) => {
+                    last_stderr = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        if tried.is_empty() {
+            Err(eyre!(
+                "no clipboard tool installed; tried: {}. Install one of them and retry.",
+                candidates.iter().map(|c| c.program).collect::<Vec<_>>().join(", ")
+            ))
+        } else {
+            let detail = last_stderr
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(no stderr)".to_string());
+            Err(eyre!(
+                "clipboard read failed; all tools tried ({}) exited non-zero. Last error: {}",
+                tried.join(", "),
+                detail
+            ))
+        }
+    }
+} // mod clipboard
+
+// Re-export the clipboard read surface for callers (CLI wiring in Phase 4) and
+// for the unit tests below. Transitional alongside the module's `dead_code`
+// allow; the public call site arrives in Phase 4.
+#[allow(unused_imports)]
+pub(crate) use clipboard::{clipboard_read_candidates, read_clipboard, strip_trailing_newline};
 
 // ============ IDENTITY MANAGEMENT ============
 
@@ -485,6 +775,76 @@ mod tests {
     fn test_filename_to_var_simple() {
         let path = Path::new("github-pat.age");
         assert_eq!(filename_to_var(path), "GITHUB_PAT");
+    }
+
+    // ---- strip_trailing_newline ----
+
+    #[test]
+    fn test_strip_trailing_newline_lf() {
+        assert_eq!(strip_trailing_newline(b"secret\n".to_vec()), b"secret".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_crlf() {
+        assert_eq!(strip_trailing_newline(b"secret\r\n".to_vec()), b"secret".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_none() {
+        assert_eq!(strip_trailing_newline(b"secret".to_vec()), b"secret".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_only_one() {
+        // Only a single trailing newline is stripped, not multiple.
+        assert_eq!(strip_trailing_newline(b"x\n\n".to_vec()), b"x\n".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_only_one_crlf() {
+        // A trailing \r\n strips both, but only the one pair.
+        assert_eq!(strip_trailing_newline(b"x\r\n\r\n".to_vec()), b"x\r\n".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_interior_preserved() {
+        assert_eq!(strip_trailing_newline(b"a\nb\n".to_vec()), b"a\nb".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_trailing_spaces_preserved() {
+        // Trailing spaces/tabs are part of the secret; not stripped.
+        assert_eq!(strip_trailing_newline(b"secret  ".to_vec()), b"secret  ".to_vec());
+        assert_eq!(strip_trailing_newline(b"secret\t\n".to_vec()), b"secret\t".to_vec());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_empty() {
+        assert_eq!(strip_trailing_newline(Vec::new()), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_just_newline() {
+        // A lone newline strips to empty.
+        assert_eq!(strip_trailing_newline(b"\n".to_vec()), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_strip_trailing_newline_lone_cr_preserved() {
+        // A bare trailing \r (no \n) is not a line ending we strip.
+        assert_eq!(strip_trailing_newline(b"secret\r".to_vec()), b"secret\r".to_vec());
+    }
+
+    // ---- clipboard candidate selection ----
+
+    #[test]
+    fn test_clipboard_read_candidates_compiles_and_returns() {
+        // read_clipboard shells out to a live selection and is not unit-testable;
+        // exercising the candidate selector keeps the read path referenced and
+        // verified to compile. The result depends on the test session's env.
+        let _candidates = clipboard_read_candidates();
+        // Reference read_clipboard so the full read path is type-checked/used.
+        let _read_fn: fn() -> Result<Vec<u8>> = read_clipboard;
     }
 
     #[test]
