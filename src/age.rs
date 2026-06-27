@@ -231,12 +231,22 @@ mod clipboard {
     /// each candidate is bounded by this.
     const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Wall-clock timeout for a single clipboard clear (write) tool invocation. A
+    /// write tool such as `xclip -selection clipboard -i` forks into the background
+    /// to *serve* the cleared selection and keeps its inherited stderr pipe open, so
+    /// a naive drain can block until another app takes the selection. Bounding each
+    /// clear invocation with the same worker-thread + recv_timeout mechanism the read
+    /// path uses prevents a daemonizing tool from hanging the process. (Per rust.md:
+    /// every external command gets a wall-clock timeout.)
+    const CLIPBOARD_CLEAR_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// Maximum number of bytes captured from the clipboard. A pathological clipboard
     /// could hold many MB; a secret value is small, so cap the capture and error
     /// rather than buffer unbounded output.
     const CLIPBOARD_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-    /// A read-only clipboard tool candidate: the program plus its read-only args.
+    /// A clipboard tool candidate: the program plus its args.
+    /// Used for both read-only and write (clear) operations.
     pub(crate) struct ClipboardTool {
         program: &'static str,
         args: &'static [&'static str],
@@ -319,6 +329,51 @@ mod clipboard {
         }
     }
 
+    /// Session-ordered write (clear) clipboard tool candidates.
+    ///
+    /// Uses the SAME session-aware selection logic as `clipboard_read_candidates`,
+    /// but returns the opt-in WRITE forms: `wl-copy --clear` (Wayland),
+    /// `xclip -selection clipboard -i /dev/null` (X11), `xsel -bc` (X11),
+    /// `pbcopy < /dev/null` (macOS). Only called when `--clear-clipboard` is passed.
+    ///
+    /// This is the ONLY place in the codebase that writes the clipboard.
+    pub(crate) fn clipboard_clear_candidates() -> Vec<ClipboardTool> {
+        let wl_copy = ClipboardTool {
+            program: "wl-copy",
+            args: &["--clear"],
+        };
+        let xclip = ClipboardTool {
+            program: "xclip",
+            args: &["-selection", "clipboard", "-i"],
+        };
+        let xsel = ClipboardTool {
+            program: "xsel",
+            args: &["-bc"],
+        };
+        let pbcopy = ClipboardTool {
+            program: "pbcopy",
+            args: &[],
+        };
+
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_x11 = std::env::var_os("DISPLAY").is_some();
+        let is_macos = cfg!(target_os = "macos");
+
+        if has_wayland {
+            debug!("clipboard_clear_candidates: session=wayland");
+            vec![wl_copy, xclip, xsel]
+        } else if has_x11 {
+            debug!("clipboard_clear_candidates: session=x11");
+            vec![xclip, xsel, wl_copy]
+        } else if is_macos {
+            debug!("clipboard_clear_candidates: session=macos");
+            vec![pbcopy]
+        } else {
+            debug!("clipboard_clear_candidates: session=headless");
+            vec![]
+        }
+    }
+
     /// Result of running a single clipboard tool.
     enum ToolOutcome {
         /// Tool exited zero; captured stdout bytes.
@@ -333,10 +388,22 @@ mod clipboard {
         SpawnError(String),
     }
 
-    /// Run a single clipboard tool read-only, bounded by a wall-clock timeout and a
-    /// byte cap. Never writes the clipboard.
-    fn run_clipboard_tool(tool: &ClipboardTool) -> ToolOutcome {
-        debug!("run_clipboard_tool: program={} args={:?}", tool.program, tool.args);
+    /// Run a single clipboard tool bounded by a wall-clock `timeout` and a byte cap.
+    ///
+    /// Used for BOTH read and clear (write) invocations. stdin is always `/dev/null`
+    /// (`Stdio::null()`): read tools take no input, and the clear tools that read
+    /// stdin (`xclip -i`, `pbcopy`) treat an immediate EOF as "set the selection to
+    /// empty" - i.e. clear it. stdout/stderr are drained on a worker thread so a
+    /// daemonizing tool (e.g. `xclip -i`, which forks to serve the selection and
+    /// holds the stderr pipe open) cannot block the parent; on timeout the worker is
+    /// detached and `Timeout` is returned.
+    fn run_clipboard_tool(tool: &ClipboardTool, timeout: Duration) -> ToolOutcome {
+        debug!(
+            "run_clipboard_tool: program={} args={:?} timeout={}s",
+            tool.program,
+            tool.args,
+            timeout.as_secs()
+        );
         let child = Command::new(tool.program)
             .args(tool.args)
             .stdin(Stdio::null())
@@ -371,7 +438,7 @@ mod clipboard {
             let _ = tx.send((status, out, err));
         });
 
-        match rx.recv_timeout(CLIPBOARD_READ_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok((status, out, err)) => {
                 let _ = waiter.join();
                 let status = match status {
@@ -438,7 +505,7 @@ mod clipboard {
                 continue;
             }
             tried.push(tool.program);
-            match run_clipboard_tool(tool) {
+            match run_clipboard_tool(tool, CLIPBOARD_READ_TIMEOUT) {
                 ToolOutcome::Ok(bytes) => {
                     let bytes = strip_trailing_newline(bytes);
                     if bytes.is_empty() {
@@ -493,18 +560,99 @@ mod clipboard {
             ))
         }
     }
+    /// Clear the system clipboard (opt-in; only called when `--clear-clipboard` is passed).
+    ///
+    /// Uses the same session-aware selection + installed-candidate fall-through as
+    /// `read_clipboard`, and the SAME timeout'd runner (`run_clipboard_tool`) so a
+    /// daemonizing write tool cannot hang the process. The write forms read their
+    /// input from `Stdio::null()`: `xclip -i` / `pbcopy` see an immediate EOF and
+    /// set the selection to empty (i.e. clear it); `wl-copy --clear` / `xsel -bc`
+    /// ignore stdin. A failure to clear is NOT fatal: the .age file has already been
+    /// written and verified. Returns an error so the caller can `warn!` + `eprintln!`
+    /// and continue.
+    ///
+    /// This is the ONLY place in the codebase that writes the clipboard.
+    pub(crate) fn clear_clipboard() -> Result<()> {
+        debug!("clear_clipboard: clearing system clipboard (opt-in)");
+        let candidates = clipboard_clear_candidates();
+        if candidates.is_empty() {
+            return Err(eyre!(
+                "no clipboard available to clear: neither $WAYLAND_DISPLAY nor $DISPLAY is set and this is not macOS"
+            ));
+        }
+
+        let mut tried: Vec<&str> = Vec::new();
+        let mut last_stderr: Option<String> = None;
+
+        for tool in &candidates {
+            if !command_exists(tool.program) {
+                debug!("clear_clipboard: skipping uninstalled tool={}", tool.program);
+                continue;
+            }
+            tried.push(tool.program);
+            match run_clipboard_tool(tool, CLIPBOARD_CLEAR_TIMEOUT) {
+                ToolOutcome::Ok(_) => {
+                    debug!("clear_clipboard: tool={} cleared clipboard successfully", tool.program);
+                    return Ok(());
+                }
+                ToolOutcome::NonZero(stderr) => {
+                    // Fall through to the next installed candidate.
+                    last_stderr = Some(stderr);
+                    continue;
+                }
+                ToolOutcome::Timeout => {
+                    // Non-fatal: surface the timeout so the caller warns and continues.
+                    return Err(eyre!(
+                        "clipboard clear via {} timed out after {}s",
+                        tool.program,
+                        CLIPBOARD_CLEAR_TIMEOUT.as_secs()
+                    ));
+                }
+                ToolOutcome::TooLarge => {
+                    // A clear produces no output; treat any output as a tool quirk and
+                    // fall through rather than failing the whole clear.
+                    debug!(
+                        "clear_clipboard: tool={} produced unexpected output; falling through",
+                        tool.program
+                    );
+                    continue;
+                }
+                ToolOutcome::SpawnError(e) => {
+                    last_stderr = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        if tried.is_empty() {
+            Err(eyre!(
+                "no clipboard clear tool installed; tried: {}. Install one of them and retry.",
+                candidates.iter().map(|c| c.program).collect::<Vec<_>>().join(", ")
+            ))
+        } else {
+            let detail = last_stderr
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(no stderr)".to_string());
+            Err(eyre!(
+                "clipboard clear failed; all tools tried ({}) failed. Last error: {}",
+                tried.join(", "),
+                detail
+            ))
+        }
+    }
 } // mod clipboard
 
 // Re-export the clipboard read surface for callers. `read_clipboard` is called
 // by the `--paste` handler; `strip_trailing_newline` by both `--name`/`--paste`
-// and the unit tests.
-pub(crate) use clipboard::{read_clipboard, strip_trailing_newline};
+// and the unit tests. `clear_clipboard` is called after a successful `--paste`
+// write when `--clear-clipboard` was passed.
+pub(crate) use clipboard::{clear_clipboard, read_clipboard, strip_trailing_newline};
 
-// `clipboard_read_candidates` is exercised only by the unit tests, which keep
-// the session-selection path referenced and type-checked; it has no production
-// call site at the crate level (it is used internally by `read_clipboard`).
+// Candidate helpers are exercised only by the unit tests, which keep the
+// session-selection paths referenced and type-checked; they have no production
+// call site at the crate level (used internally by `read_clipboard`/`clear_clipboard`).
 #[cfg(test)]
-pub(crate) use clipboard::clipboard_read_candidates;
+pub(crate) use clipboard::{clipboard_clear_candidates, clipboard_read_candidates};
 
 // ============ NAMED ENCRYPTION ============
 
@@ -1104,6 +1252,41 @@ mod tests {
         let _candidates = clipboard_read_candidates();
         // Reference read_clipboard so the full read path is type-checked/used.
         let _read_fn: fn() -> Result<Vec<u8>> = read_clipboard;
+    }
+
+    // ---- Phase 6: --clear-clipboard ----
+
+    #[test]
+    fn test_clipboard_clear_candidates_compiles_and_returns() {
+        // clear_clipboard shells out to a live write tool and is not unit-testable;
+        // exercising the candidate selector keeps the clear path referenced and
+        // verified to compile. The result depends on the test session's env.
+        let _candidates = clipboard_clear_candidates();
+        // Reference clear_clipboard so the full clear path is type-checked/used.
+        let _clear_fn: fn() -> Result<()> = clear_clipboard;
+    }
+
+    #[test]
+    fn test_clipboard_clear_candidates_session_aware() {
+        // The clear candidate set must be non-empty when any display session is
+        // active. This is a compile/logic check: the structure of candidates mirrors
+        // read candidates (same session-aware selection). We do not assert specific
+        // program names because the result depends on the build platform.
+        let candidates = clipboard_clear_candidates();
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_x11 = std::env::var_os("DISPLAY").is_some();
+        let is_macos = cfg!(target_os = "macos");
+        if has_wayland || has_x11 || is_macos {
+            assert!(
+                !candidates.is_empty(),
+                "expected non-empty clear candidates in a graphical session"
+            );
+        } else {
+            assert!(
+                candidates.is_empty(),
+                "expected empty clear candidates in headless session"
+            );
+        }
     }
 
     #[test]

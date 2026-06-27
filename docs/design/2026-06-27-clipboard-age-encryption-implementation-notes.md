@@ -114,3 +114,34 @@
 
 ### Open questions
 - None.
+
+## Phase 6: --clear-clipboard
+
+### Design decisions
+- `clear_clipboard()` lives in `mod clipboard` in `src/age.rs`, alongside `read_clipboard`. It re-exports via `pub(crate) use clipboard::clear_clipboard` (unconditional, not `#[cfg(test)]`), since it has a production call site in `src/main.rs`. - `src/age.rs:clear_clipboard`
+- Added `clipboard_clear_candidates()` using the SAME session-aware selection logic as `clipboard_read_candidates` (same `WAYLAND_DISPLAY`/`DISPLAY`/macOS detection), but returning OPT-IN WRITE forms: `wl-copy --clear` (Wayland), `xclip -selection clipboard -i` (X11), `xsel -bc` (X11), `pbcopy` (macOS, stdin from `/dev/null`). The same `command_exists` helper is reused for installed-candidate fall-through. - `src/age.rs:clipboard_clear_candidates`
+- For `xclip -i` and `pbcopy`, `/dev/null` is opened and passed as stdin via `Stdio::from(File::open("/dev/null")?)`. For `wl-copy --clear` and `xsel -bc`, `Stdio::null()` is used. This matches how the write forms work: xclip reads from stdin (empty = clear), pbcopy reads from stdin (empty = clear), while wl-copy/xsel take no stdin for their clear/reset flags. - `src/age.rs:clear_clipboard`
+- `clear_clipboard()` does NOT use the thread-based timeout mechanism from `run_clipboard_tool`. The write tools are instantaneous (they set the clipboard state and exit); hanging is not a realistic failure mode for a write that takes no input. Simpler synchronous `Command::output()` is appropriate here. - `src/age.rs:clear_clipboard`
+- The `--clear-clipboard`-without-`--paste` rejection is placed in the manual exclusivity validation block in `handle_age_command`, BEFORE recipient resolution. This ensures the error is immediate and costs nothing (no key loading, no clipboard access). The error message is: `"--clear-clipboard is only valid with --paste"`. - `src/main.rs:handle_age_command`
+- `clear_clipboard()` is called ONLY after a successful, verified `encrypt_named` returns `Ok` in the `--paste` branch. If it fails, `warn!` AND `eprintln!` are both emitted (a bare `warn!` is log-file-only per `src/main.rs:195-203`), then execution continues and `return Ok(())` is reached - non-fatal. - `src/main.rs:handle_age_command`
+- `debug!` entry log in `clear_clipboard` records entry and exit (tool name + outcome). The `--paste` handler's entry log was updated to include `clear_clipboard={}`. - `src/age.rs:clear_clipboard`, `src/main.rs:handle_age_command`
+- `clipboard_clear_candidates` is re-exported under `#[cfg(test)] pub(crate) use` (same as `clipboard_read_candidates`) since its only crate-level reference is the test that exercises the session-selection logic. - `src/age.rs`
+
+### Deviations
+- `clear_clipboard()` uses a synchronous `Command::output()` rather than the thread+timeout approach used in `run_clipboard_tool`. The write forms are fast (no blocking on compositor reads); the timeout complexity is not warranted. This is a deliberate simplification, not an oversight.
+- The `--clear-clipboard`-without-`--paste` validation rejects use with `--name` as well as positional inputs. The design doc's open question said "proposed: only `--paste`" and Phase 6 implements that strictly - any mode without `--paste` is rejected.
+
+### Tradeoffs
+- Synchronous `Command::output()` for clear vs. thread+timeout: simpler, no detached worker threads, appropriate because clipboard write tools exit immediately. A stuck compositor preventing `wl-copy --clear` from exiting would require explicit timeout, but that failure mode has not been observed and the spec does not require it for the write path.
+- Opening `/dev/null` per-call for xclip/pbcopy vs. passing `Stdio::inherit()` or accepting empty pipe: chosen `/dev/null` because it makes the intent explicit (supply empty input to clear) and avoids any risk of the tool inheriting an interactive terminal's stdin.
+- Placing the `--clear-clipboard`-without-`--paste` check before recipient resolution: cheaper than checking after, and gives a clear pre-flight error before any key file I/O or network access.
+
+### Open questions
+- None.
+
+### Follow-up fix: wall-clock timeout on the clear path (supersedes the synchronous-`output()` decision above)
+- The initial implementation ran the clear tools via a plain `Command::output()` with no wall-clock timeout. That is a real hang risk and violates rust.md ("EVERY external command gets a wall-clock timeout"): `xclip -selection clipboard -i` forks into the background to *serve* the cleared selection and keeps its inherited stderr pipe open, so `output()` can block draining stderr until another app takes the selection.
+- Fix: `clear_clipboard()` now routes through the SAME timeout'd runner the read path uses (`run_clipboard_tool`), which drains stdout/stderr on a worker thread and bounds the wait with `recv_timeout`, detaching on timeout. `run_clipboard_tool` was generalized to take a `timeout: Duration` parameter; `read_clipboard` passes `CLIPBOARD_READ_TIMEOUT`, `clear_clipboard` passes the new named const `CLIPBOARD_CLEAR_TIMEOUT` (5s). No hardcoded literal. - `src/age.rs:run_clipboard_tool`, `src/age.rs:clear_clipboard`, `src/age.rs:CLIPBOARD_CLEAR_TIMEOUT`
+- The per-tool `/dev/null` open was removed: `run_clipboard_tool` always uses `Stdio::null()` for stdin, which gives `xclip -i` / `pbcopy` an immediate EOF (set selection to empty = clear); `wl-copy --clear` / `xsel -bc` ignore stdin. This is functionally identical to the prior `/dev/null` open and drops the now-unneeded `std::fs::File` handling. - `src/age.rs:run_clipboard_tool`, `src/age.rs:clear_clipboard`
+- A clear timeout is still best-effort/non-fatal: `ToolOutcome::Timeout` surfaces an error that the `--paste` caller already handles with `warn!` + `eprintln!` + continue (the .age file is written and verified). `clear_clipboard` also gained read-path-style fall-through accounting (`tried`/`last_stderr`) so a non-zero or spawn-failed tool falls through to the next installed candidate, and the final error distinguishes "no tool installed" from "all tools failed".
+- This SUPERSEDES the "Design decisions" bullet and the two "Tradeoffs" bullets above that argued a synchronous `output()` without a timeout was sufficient; those reasonings were wrong about the daemonizing-`xclip` hang.

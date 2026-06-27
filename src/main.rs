@@ -337,6 +337,12 @@ fn handle_age_command(
                     "--paste cannot be combined with positional inputs; choose one input source"
                 ));
             }
+            // --clear-clipboard only makes sense with --paste (the only mode that reads
+            // the clipboard). Reject it up front when used with --name, KEY=VAL, file,
+            // or "-" so the user gets a clear diagnostic rather than a silent no-op.
+            if clear_clipboard && paste.is_none() {
+                return Err(eyre::eyre!("--clear-clipboard is only valid with --paste"));
+            }
 
             let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
             let identity_path = identity.as_deref().map(Path::new);
@@ -374,7 +380,10 @@ fn handle_age_command(
 
             // --paste: read secret from the clipboard, then the same path as --name.
             if let Some(ref name) = paste {
-                debug!("handle_age_command: --paste path name={}", name);
+                debug!(
+                    "handle_age_command: --paste path name={} clear_clipboard={}",
+                    name, clear_clipboard
+                );
 
                 // Read the secret read-only from the system clipboard. read_clipboard
                 // already strips a single trailing newline and errors on empty.
@@ -386,6 +395,21 @@ fn handle_age_command(
                 let written =
                     age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
                 println!("encrypted: {}", written.display());
+
+                // Opt-in clipboard clear: only after a successful, verified write.
+                // A failure to clear is NON-FATAL (the file is already written and
+                // verified). A bare warn! is invisible (log-file only per
+                // src/main.rs:195-203), so we also eprintln! to stderr.
+                if clear_clipboard {
+                    debug!("handle_age_command: --clear-clipboard requested, clearing clipboard");
+                    if let Err(e) = age::clear_clipboard() {
+                        warn!("handle_age_command: clear_clipboard failed: {}", e);
+                        eprintln!("WARNING: failed to clear the clipboard: {e}");
+                    } else {
+                        debug!("handle_age_command: clipboard cleared successfully");
+                    }
+                }
+
                 return Ok(());
             }
 
@@ -625,6 +649,71 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ---- Phase 6: --clear-clipboard validation ----
+
+    #[test]
+    fn test_clear_clipboard_without_paste_is_rejected() {
+        // --clear-clipboard is only valid with --paste. Using it with --name must
+        // produce a clear error before any clipboard or encryption operation runs.
+        // We call handle_age_command directly with clear_clipboard=true, name=Some,
+        // paste=None, and an identity that will fail (so we don't need a real key).
+        // The validation runs before recipient resolution, so the error must mention
+        // "--clear-clipboard is only valid with --paste".
+        let result = handle_age_command(
+            None,  // identity
+            None,  // recipient
+            false, // keygen
+            false, // public_key
+            Some(crate::cli::AgeAction::Encrypt {
+                inputs: vec![],
+                name: Some("MY_SECRET".to_string()),
+                paste: None,
+                force: false,
+                clear_clipboard: true,
+                output_dir: None,
+            }),
+        );
+        assert!(
+            result.is_err(),
+            "expected error when --clear-clipboard used without --paste"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("--clear-clipboard is only valid with --paste"),
+            "expected message about --paste, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_clear_clipboard_without_paste_kv_is_rejected() {
+        // --clear-clipboard with a KEY=VAL positional (no --paste) must also be rejected.
+        let result = handle_age_command(
+            None,
+            None,
+            false,
+            false,
+            Some(crate::cli::AgeAction::Encrypt {
+                inputs: vec!["MY_KEY=my_value".to_string()],
+                name: None,
+                paste: None,
+                force: false,
+                clear_clipboard: true,
+                output_dir: None,
+            }),
+        );
+        assert!(
+            result.is_err(),
+            "expected error when --clear-clipboard used with KEY=VAL"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("--clear-clipboard is only valid with --paste"),
+            "expected message about --paste, got: {}",
+            msg
+        );
+    }
 
     fn make_cli(home: &str) -> Cli {
         Cli {
