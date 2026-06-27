@@ -17,7 +17,7 @@ use eyre::WrapErr;
 use log::*;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -272,19 +272,48 @@ fn handle_age_command(
                 output_dir
             );
 
-            // Legacy positional modes use "." as the default output dir;
-            // output_dir Option resolution for new --name/--paste modes comes later (Phase 5).
-            let legacy_output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
-
             let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
 
-            // --name and --paste modes: not yet implemented (Phase 3/4).
-            // Accept and ignore the flags for now so existing modes stay working.
-            if name.is_some() || paste.is_some() {
-                return Err(eyre::eyre!(
-                    "--name and --paste are not yet implemented (coming in a later phase)"
-                ));
+            // --name: read secret from stdin, write <name>.age atomically.
+            if let Some(ref name) = name {
+                debug!("handle_age_command: --name path name={}", name);
+
+                // Guard: if stdin is an interactive TTY there is nothing to read.
+                if std::io::stdin().is_terminal() {
+                    return Err(eyre::eyre!("stdin is a TTY; pipe a value into --name, or use --paste"));
+                }
+
+                // Read all of stdin.
+                let mut plaintext = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut plaintext)
+                    .wrap_err("failed to read stdin")?;
+
+                // Strip a single trailing newline (matches clipboard semantics).
+                let plaintext = age::strip_trailing_newline(plaintext);
+
+                // Resolve the output directory: -o DIR, or error.
+                // Phase 5 will insert the secrets-store tier before the error.
+                let out_dir = match output_dir {
+                    Some(ref dir) => dir.clone(),
+                    None => {
+                        return Err(eyre::eyre!("no output directory: pass -o DIR"));
+                    }
+                };
+
+                let written = age::encrypt_named(name, &plaintext, recipient_box.as_ref(), &out_dir, force)?;
+                println!("encrypted: {}", written.display());
+                return Ok(());
             }
+
+            // --paste: not yet implemented (Phase 4).
+            if paste.is_some() {
+                return Err(eyre::eyre!("--paste is not yet implemented (coming in Phase 4)"));
+            }
+
+            // Legacy positional modes use "." as the default output dir;
+            // output_dir Option resolution for new --name/--paste modes is above.
+            let legacy_output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
             // Classify inputs and reject mixed modes
             let mut has_files = false;

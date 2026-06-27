@@ -6,6 +6,7 @@ use age::{Decryptor, Encryptor, Identity, Recipient};
 use eyre::{Result, WrapErr, eyre};
 use log::{debug, error, warn};
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -505,6 +506,165 @@ mod clipboard {
 // allow; the public call site arrives in Phase 4.
 #[allow(unused_imports)]
 pub(crate) use clipboard::{clipboard_read_candidates, read_clipboard, strip_trailing_newline};
+
+// ============ NAMED ENCRYPTION ============
+
+/// Validate a secret name: reject empty, path separators (`/`, `\`), and
+/// bare path components (`.`, `..`). A secret name must be a plain identifier
+/// such as `DRATA_READONLY_API_KEY`, never a path. Pure and unit-testable.
+pub(crate) fn validate_name(name: &str) -> Result<()> {
+    debug!("validate_name: name_len={}", name.len());
+    if name.is_empty() {
+        return Err(eyre!("secret name must not be empty"));
+    }
+    if name.contains('/') {
+        return Err(eyre!(
+            "secret name '{}' must not contain '/'; use a bare identifier",
+            name
+        ));
+    }
+    if name.contains('\\') {
+        return Err(eyre!(
+            "secret name '{}' must not contain '\\'; use a bare identifier",
+            name
+        ));
+    }
+    // Reject `.` and `..` as the whole name, or as a path component embedded
+    // with a path separator. Since we already rejected '/' and '\\', the only
+    // remaining cases to catch are a name that *is* `.` or `..`.
+    if name == "." || name == ".." {
+        return Err(eyre!(
+            "secret name '{}' must not be a relative path component; use a bare identifier",
+            name
+        ));
+    }
+    debug!("validate_name: name is valid");
+    Ok(())
+}
+
+/// Encrypt `plaintext` to `<output_dir>/var_to_filename(name)`, honoring `force`.
+///
+/// Steps:
+/// 1. Validate `name` with `validate_name`.
+/// 2. Confirm `output_dir` already exists (refuse-to-invent guard).
+/// 3. Write ciphertext to a temp file `<output_dir>/.<name>.age.tmp-<pid>`.
+/// 4. `fsync` the temp file.
+/// 5. Rename into place:
+///    - `force=false`: create-new semantics (fail if target exists).
+///    - `force=true`: atomic rename over any existing target.
+/// 6. On any failure, remove the temp file; the target is never touched.
+///
+/// Returns the written path on success.
+///
+/// NOTE: round-trip verification is Phase 4. This function writes atomically
+/// but does not decrypt-verify before rename.
+pub(crate) fn encrypt_named(
+    name: &str,
+    plaintext: &[u8],
+    recipient: &dyn Recipient,
+    output_dir: &Path,
+    force: bool,
+) -> Result<PathBuf> {
+    debug!(
+        "encrypt_named: name={} plaintext_len={} output_dir={} force={}",
+        name,
+        plaintext.len(),
+        output_dir.display(),
+        force
+    );
+
+    validate_name(name)?;
+
+    if !output_dir.exists() {
+        return Err(eyre!(
+            "output directory '{}' does not exist; create it or pass a different -o DIR",
+            output_dir.display()
+        ));
+    }
+
+    let filename = var_to_filename(name);
+    let target = output_dir.join(&filename);
+    let tmp_name = format!(".{}.tmp-{}", filename, std::process::id());
+    let tmp_path = output_dir.join(&tmp_name);
+
+    debug!("encrypt_named: target={} tmp={}", target.display(), tmp_path.display());
+
+    let ciphertext = encrypt(plaintext, recipient).wrap_err("failed to encrypt plaintext")?;
+
+    // Write temp file; remove it on any subsequent failure.
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .wrap_err_with(|| format!("failed to create temp file '{}'", tmp_path.display()))?;
+        file.write_all(&ciphertext)
+            .wrap_err("failed to write ciphertext to temp file")?;
+        file.sync_all().wrap_err("failed to sync temp file to disk")?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        // Best-effort cleanup of the temp file.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Rename into place, respecting the force flag.
+    let rename_result = if force {
+        // Atomic rename: replaces an existing target (or a symlink at that path).
+        fs::rename(&tmp_path, &target).wrap_err_with(|| format!("failed to rename temp file to '{}'", target.display()))
+    } else {
+        // Create-new semantics: fail if the target already exists.
+        // We use a hard-link + remove-temp approach to avoid TOCTOU:
+        // fs::hard_link fails if the destination exists (on most FSes).
+        // Then we remove the temp. If hard_link fails, the temp is removed and
+        // we return the error.
+        match fs::hard_link(&tmp_path, &target) {
+            Ok(()) => {
+                let _ = fs::remove_file(&tmp_path);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Target already exists and force=false.
+                let _ = fs::remove_file(&tmp_path);
+                Err(eyre!(
+                    "target '{}' already exists; pass --force to overwrite",
+                    target.display()
+                ))
+            }
+            Err(e) => {
+                // hard_link not supported or other error; fall back to rename with
+                // an existence pre-check (not atomic but still correct under
+                // normal single-writer use).
+                if target.exists() {
+                    let _ = fs::remove_file(&tmp_path);
+                    Err(eyre!(
+                        "target '{}' already exists; pass --force to overwrite",
+                        target.display()
+                    ))
+                } else {
+                    // Try rename as a last resort.
+                    fs::rename(&tmp_path, &target).map_err(|_| eyre!("hard_link failed ({}); rename also failed", e))
+                }
+            }
+        }
+    };
+
+    if let Err(e) = rename_result {
+        // The temp may already be removed in the no-force path above, but
+        // attempt cleanup unconditionally in the force path.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    debug!(
+        "encrypt_named: wrote {} bytes to '{}'",
+        ciphertext.len(),
+        target.display()
+    );
+    Ok(target)
+}
 
 // ============ IDENTITY MANAGEMENT ============
 
@@ -1153,5 +1313,167 @@ mod tests {
 
         let env_output = render_env(tmp.path(), &identity);
         assert_eq!(env_output, "");
+    }
+
+    // ---- validate_name ----
+
+    #[test]
+    fn test_validate_name_empty() {
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_slash() {
+        assert!(validate_name("a/b").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_dot_dot_slash() {
+        // The full path ../x contains a '/' so it is rejected.
+        assert!(validate_name("../x").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_dot() {
+        assert!(validate_name(".").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_dot_dot() {
+        assert!(validate_name("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_backslash() {
+        assert!(validate_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_valid_env_var() {
+        assert!(validate_name("DRATA_READONLY_API_KEY").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_valid_simple() {
+        assert!(validate_name("MY_SECRET").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_valid_lowercase() {
+        // Lowercase identifiers are also valid names.
+        assert!(validate_name("my-secret").is_ok());
+    }
+
+    // ---- encrypt_named ----
+
+    #[test]
+    fn test_encrypt_named_roundtrip() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let plaintext = b"super-secret-value";
+
+        let written = encrypt_named("GITHUB_PAT", plaintext, &recipient, tmp.path(), false).unwrap();
+
+        // The file must have been placed at the expected path.
+        let expected = tmp.path().join("github-pat.age");
+        assert_eq!(written, expected);
+        assert!(expected.exists());
+
+        // Decrypt and assert byte-equality.
+        let decrypted = decrypt_file(&expected, &identity).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_named_force_false_existing_target_errors() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let plaintext = b"first-value";
+
+        // First write succeeds.
+        encrypt_named("MY_KEY", plaintext, &recipient, tmp.path(), false).unwrap();
+
+        // Second write without force must fail.
+        let result = encrypt_named("MY_KEY", b"second-value", &recipient, tmp.path(), false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("already exists"), "expected 'already exists' in: {}", msg);
+    }
+
+    #[test]
+    fn test_encrypt_named_force_true_overwrites() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // First write.
+        encrypt_named("MY_KEY", b"first-value", &recipient, tmp.path(), false).unwrap();
+
+        // Overwrite with force=true.
+        encrypt_named("MY_KEY", b"second-value", &recipient, tmp.path(), true).unwrap();
+
+        // Decrypt must yield the second value.
+        let target = tmp.path().join("my-key.age");
+        let decrypted = decrypt_file(&target, &identity).unwrap();
+        assert_eq!(decrypted, b"second-value");
+    }
+
+    #[test]
+    fn test_encrypt_named_missing_dir_errors() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let nonexistent = PathBuf::from("/tmp/this-dir-should-not-exist-manifest-phase3-test");
+        let result = encrypt_named("MY_KEY", b"value", &recipient, &nonexistent, false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("does not exist"), "expected 'does not exist' in: {}", msg);
+    }
+
+    #[test]
+    fn test_encrypt_named_no_temp_left_on_failure() {
+        // When force=false and target already exists, the temp file must not remain.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        encrypt_named("MY_KEY", b"first", &recipient, tmp.path(), false).unwrap();
+
+        // Second write fails.
+        let _ = encrypt_named("MY_KEY", b"second", &recipient, tmp.path(), false);
+
+        // Verify no temp file remains.
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "temp file(s) left behind: {:?}",
+            entries.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_encrypt_named_atomic_overwrite_old_content_gone() {
+        // force=true over an existing file: after success the old content must be gone.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        encrypt_named("MY_KEY", b"old-content", &recipient, tmp.path(), false).unwrap();
+        encrypt_named("MY_KEY", b"new-content", &recipient, tmp.path(), true).unwrap();
+
+        let target = tmp.path().join("my-key.age");
+        let decrypted = decrypt_file(&target, &identity).unwrap();
+        assert_eq!(decrypted, b"new-content");
+        // Confirm old content is gone by checking the decrypted value is not old.
+        assert_ne!(decrypted, b"old-content");
     }
 }
