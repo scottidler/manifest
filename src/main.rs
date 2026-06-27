@@ -272,7 +272,28 @@ fn handle_age_command(
                 output_dir
             );
 
+            // Manual exclusivity validation. The clap `encrypt-input` ArgGroup is a
+            // backstop, not the sole gate: clap is historically fragile expressing
+            // mutual exclusion between a Vec<String> positional and flags. Reject
+            // every disallowed combination explicitly with a clear error.
+            if name.is_some() && paste.is_some() {
+                return Err(eyre::eyre!(
+                    "--name and --paste are mutually exclusive; choose one input source"
+                ));
+            }
+            if name.is_some() && !inputs.is_empty() {
+                return Err(eyre::eyre!(
+                    "--name cannot be combined with positional inputs; choose one input source"
+                ));
+            }
+            if paste.is_some() && !inputs.is_empty() {
+                return Err(eyre::eyre!(
+                    "--paste cannot be combined with positional inputs; choose one input source"
+                ));
+            }
+
             let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
+            let identity_path = identity.as_deref().map(Path::new);
 
             // --name: read secret from stdin, write <name>.age atomically.
             if let Some(ref name) = name {
@@ -301,14 +322,33 @@ fn handle_age_command(
                     }
                 };
 
-                let written = age::encrypt_named(name, &plaintext, recipient_box.as_ref(), &out_dir, force)?;
+                let written =
+                    age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
                 println!("encrypted: {}", written.display());
                 return Ok(());
             }
 
-            // --paste: not yet implemented (Phase 4).
-            if paste.is_some() {
-                return Err(eyre::eyre!("--paste is not yet implemented (coming in Phase 4)"));
+            // --paste: read secret from the clipboard, then the same path as --name.
+            if let Some(ref name) = paste {
+                debug!("handle_age_command: --paste path name={}", name);
+
+                // Read the secret read-only from the system clipboard. read_clipboard
+                // already strips a single trailing newline and errors on empty.
+                let plaintext = age::read_clipboard()?;
+
+                // Resolve the output directory: -o DIR, or error.
+                // Phase 5 will insert the secrets-store tier before the error.
+                let out_dir = match output_dir {
+                    Some(ref dir) => dir.clone(),
+                    None => {
+                        return Err(eyre::eyre!("no output directory: pass -o DIR"));
+                    }
+                };
+
+                let written =
+                    age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
+                println!("encrypted: {}", written.display());
+                return Ok(());
             }
 
             // Legacy positional modes use "." as the default output dir;
