@@ -254,8 +254,37 @@ fn handle_age_command(
             print!("{}", output);
             Ok(())
         }
-        Some(AgeAction::Encrypt { inputs, output_dir }) => {
+        Some(AgeAction::Encrypt {
+            inputs,
+            name,
+            paste,
+            force,
+            clear_clipboard,
+            output_dir,
+        }) => {
+            debug!(
+                "handle_age_command: encrypt inputs.len={} name={:?} paste={:?} force={} clear_clipboard={} output_dir={:?}",
+                inputs.len(),
+                name,
+                paste,
+                force,
+                clear_clipboard,
+                output_dir
+            );
+
+            // Legacy positional modes use "." as the default output dir;
+            // output_dir Option resolution for new --name/--paste modes comes later (Phase 5).
+            let legacy_output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+
             let recipient_box = age::resolve_recipient(recipient.as_deref(), identity.as_deref())?;
+
+            // --name and --paste modes: not yet implemented (Phase 3/4).
+            // Accept and ignore the flags for now so existing modes stay working.
+            if name.is_some() || paste.is_some() {
+                return Err(eyre::eyre!(
+                    "--name and --paste are not yet implemented (coming in a later phase)"
+                ));
+            }
 
             // Classify inputs and reject mixed modes
             let mut has_files = false;
@@ -288,14 +317,14 @@ fn handle_age_command(
                     } else {
                         let ciphertext = age::encrypt_file(Path::new(input), recipient_box.as_ref())?;
                         let stem = Path::new(input).file_stem().unwrap_or_default().to_string_lossy();
-                        let out_path = Path::new(&output_dir).join(format!("{}.age", stem));
+                        let out_path = legacy_output_dir.join(format!("{}.age", stem));
                         std::fs::write(&out_path, &ciphertext)?;
                     }
                 } else if input.contains('=') {
                     let (key, val) = input.split_once('=').unwrap();
                     let filename = age::var_to_filename(key);
                     let ciphertext = age::encrypt(val.as_bytes(), recipient_box.as_ref())?;
-                    let out_path = Path::new(&output_dir).join(&filename);
+                    let out_path = legacy_output_dir.join(&filename);
                     std::fs::write(&out_path, &ciphertext)?;
                 } else {
                     return Err(eyre::eyre!(
@@ -304,6 +333,7 @@ fn handle_age_command(
                     ));
                 }
             }
+            debug!("handle_age_command: encrypt completed for {} inputs", inputs.len());
             Ok(())
         }
         None => Err(eyre::eyre!(

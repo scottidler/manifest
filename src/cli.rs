@@ -1,7 +1,8 @@
 // src/cli.rs
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use log::{debug, error, warn};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn check_hash(program: &str) -> bool {
@@ -231,14 +232,36 @@ pub enum Commands {
 #[derive(Debug, Subcommand)]
 pub enum AgeAction {
     /// Encrypt files or key-value pairs
+    #[command(group(
+        ArgGroup::new("encrypt-input")
+            .required(true)
+            .multiple(false)
+            .args(["inputs", "name", "paste"])
+    ))]
     Encrypt {
-        /// Files or KEY=VAL pairs to encrypt
-        #[arg(required = true, num_args = 1..)]
+        /// Files or KEY=VAL pairs or "-" for stdin (existing modes)
+        #[arg(num_args = 1.., group = "encrypt-input")]
         inputs: Vec<String>,
 
-        /// Output directory for generated .age files (KEY=VAL and multi-file mode)
-        #[arg(short = 'o', long = "output-dir", default_value = ".")]
-        output_dir: String,
+        /// Read the secret value from stdin and write <name>.age
+        #[arg(long, value_name = "NAME", group = "encrypt-input")]
+        name: Option<String>,
+
+        /// Read the secret value from the system clipboard and write <name>.age
+        #[arg(long, value_name = "NAME", group = "encrypt-input")]
+        paste: Option<String>,
+
+        /// Overwrite an existing <name>.age (otherwise refuse)
+        #[arg(long)]
+        force: bool,
+
+        /// After a successful write, clear the system clipboard (opt-in)
+        #[arg(long)]
+        clear_clipboard: bool,
+
+        /// Output directory for generated .age files
+        #[arg(short = 'o', long = "output-dir")]
+        output_dir: Option<PathBuf>,
     },
 
     /// Decrypt .age files and output key-value pairs
