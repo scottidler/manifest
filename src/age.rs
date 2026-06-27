@@ -676,12 +676,12 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
             name
         ));
     }
-    // Reject `.` and `..` as the whole name, or as a path component embedded
-    // with a path separator. Since we already rejected '/' and '\\', the only
-    // remaining cases to catch are a name that *is* `.` or `..`.
-    if name == "." || name == ".." {
+    // Reject any '.' so a name can't smuggle a file extension (`secret.age`),
+    // a hidden-file prefix (`.secret`), or a relative path component (`.`/`..`)
+    // into the output filename. A secret name is a bare identifier.
+    if name.contains('.') {
         return Err(eyre!(
-            "secret name '{}' must not be a relative path component; use a bare identifier",
+            "secret name '{}' must not contain '.'; use a bare identifier",
             name
         ));
     }
@@ -1623,6 +1623,25 @@ mod tests {
     #[test]
     fn test_validate_name_dot_dot() {
         assert!(validate_name("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_embedded_dot() {
+        // A '.' anywhere is rejected: a name is a bare identifier, never a path
+        // component or a filename with an extension.
+        assert!(validate_name("foo.bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_age_suffix_rejected() {
+        // The '.age' suffix is appended by var_to_filename by convention; the
+        // user must never include it themselves.
+        assert!(validate_name("secret.age").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_leading_dot() {
+        assert!(validate_name(".hidden").is_err());
     }
 
     #[test]

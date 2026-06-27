@@ -237,8 +237,11 @@ escape the output dir - a path-traversal write. Before calling `var_to_filename`
 name:
 
 - Reject an empty name (`--paste ""` would otherwise produce `.age`).
-- Reject any name containing `/`, `\`, or a path component (`.`/`..`). A secret name is a bare
-  identifier (`DRATA_READONLY_API_KEY`), never a path.
+- Reject any name containing `/` or `\`.
+- Reject any name containing `.` (this subsumes `.`/`..` and also blocks a smuggled extension
+  like `secret.age` or a hidden-file prefix like `.secret`). A secret name is a bare identifier
+  (`DRATA_READONLY_API_KEY`); the `.age` suffix is appended by `var_to_filename` by convention
+  and must never be typed by the user.
 - `eyre!` with a clear message on violation; write nothing.
 
 This guard lives in `encrypt_named` (or a small `validate_name` helper) so both `--name` and
