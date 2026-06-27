@@ -34,10 +34,17 @@ The output is meant to be piped to bash: `manifest | bash` or `manifest --link '
 ### Subcommands
 
 - Default (no subcommand): generate Bash script from manifest
-- `age encrypt`: encrypt files or KEY=VAL pairs using age
+- `age encrypt KEY=VAL ...`: encrypt KEY=VAL pairs, write `<key>.age` to `-o DIR` (defaults to `.`)
+- `age encrypt --name NAME`: read secret from stdin, write `<name>.age` to secrets store or `-o DIR`
+- `age encrypt --paste NAME`: read secret from clipboard, write `<name>.age` to secrets store or `-o DIR`
+- `age encrypt --force ...`: overwrite an existing `.age` file (required for `--name`/`--paste`/`KEY=VAL` when target exists)
+- `age encrypt --paste NAME --clear-clipboard`: clear clipboard after a successful write (opt-in)
 - `age decrypt`: decrypt .age files, output as export or env format
 - `age --keygen`: generate new age identity
 - `age --public-key`: show public key from identity file
+
+`--name` and `--paste` write to the first of: `-o DIR`, `secrets-store` from `manifest.yml`, or error.
+Configure the secrets store in `manifest.yml` with `secrets-store: ~/repos/scottidler/secrets/.secrets`.
 
 ## Config Discovery
 

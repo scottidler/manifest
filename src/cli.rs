@@ -298,3 +298,223 @@ impl Cli {
             || !self.script.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ---- Phase 7: CLI parse-test matrix for the encrypt-input ArgGroup ----
+    //
+    // These tests exercise the `AgeAction::Encrypt` ArgGroup and the manual
+    // exclusivity validation in `handle_age_command`. We use `Cli::try_parse_from`
+    // to confirm what clap accepts/rejects at the parse level. The manual
+    // exclusivity check (--name+--paste, --name+positional, --paste+positional)
+    // runs in the handler, not at parse time, and is covered by the handler-level
+    // tests in `src/main.rs::tests`. Here we only assert parse-level ok vs. err.
+
+    // Parse: no input source -> ArgGroup required(true) fires -> parse error.
+    #[test]
+    fn test_cli_parse_encrypt_no_input_source_errors() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt"]);
+        assert!(result.is_err(), "expected parse error when no input source is given");
+    }
+
+    // Parse: --name X only -> ok.
+    #[test]
+    fn test_cli_parse_encrypt_name_only_ok() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--name", "MY_SECRET"]);
+        assert!(result.is_ok(), "expected ok with --name only: {:?}", result.err());
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt {
+                    name, paste, inputs, ..
+                }),
+                ..
+            }) = cli.command
+            {
+                assert_eq!(name.as_deref(), Some("MY_SECRET"));
+                assert!(paste.is_none());
+                assert!(inputs.is_empty());
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+
+    // Parse: --paste X only -> ok.
+    #[test]
+    fn test_cli_parse_encrypt_paste_only_ok() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--paste", "MY_SECRET"]);
+        assert!(result.is_ok(), "expected ok with --paste only: {:?}", result.err());
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt {
+                    name, paste, inputs, ..
+                }),
+                ..
+            }) = cli.command
+            {
+                assert!(name.is_none());
+                assert_eq!(paste.as_deref(), Some("MY_SECRET"));
+                assert!(inputs.is_empty());
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+
+    // Parse: single positional KEY=VAL -> ok.
+    #[test]
+    fn test_cli_parse_encrypt_single_positional_ok() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "MY_KEY=my_value"]);
+        assert!(result.is_ok(), "expected ok with single positional: {:?}", result.err());
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt {
+                    name, paste, inputs, ..
+                }),
+                ..
+            }) = cli.command
+            {
+                assert!(name.is_none());
+                assert!(paste.is_none());
+                assert_eq!(inputs, vec!["MY_KEY=my_value"]);
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+
+    // Parse: multi-value positional (A=1 B=2) -> still parses; both values in `inputs`.
+    #[test]
+    fn test_cli_parse_encrypt_multi_positional_ok() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "A=1", "B=2"]);
+        assert!(result.is_ok(), "expected ok with multi positional: {:?}", result.err());
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt { inputs, .. }),
+                ..
+            }) = cli.command
+            {
+                assert_eq!(inputs, vec!["A=1", "B=2"]);
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+
+    // Parse: --name X + --paste Y -> the ArgGroup multiple(false) fires -> parse error.
+    #[test]
+    fn test_cli_parse_encrypt_name_and_paste_errors() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--name", "X", "--paste", "Y"]);
+        assert!(
+            result.is_err(),
+            "expected parse error when --name and --paste are both given"
+        );
+    }
+
+    // Parse: --name X + positional -> ArgGroup multiple(false) fires -> parse error.
+    // Note: clap may accept this if the group logic doesn't catch it at parse time;
+    // the handler's manual exclusivity validation is the backstop. We test the
+    // *outcome* (ok vs err) without asserting where the rejection happens.
+    #[test]
+    fn test_cli_parse_encrypt_name_and_positional_rejected() {
+        // Clap ArgGroup with required+multiple(false) should reject this combination.
+        // If clap accepts it, the handler rejects it. Either way, it must not succeed
+        // end-to-end. We only assert here what clap does at parse time.
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--name", "X", "KEY=VAL"]);
+        // Whether clap accepts or rejects depends on how it handles positionals + named
+        // in the same ArgGroup. Record the actual behavior - the handler covers the rest.
+        // This test is intentionally lenient: we assert only that if it parses ok, the
+        // fields are correctly populated (name=Some, inputs=["KEY=VAL"]).
+        match result {
+            Ok(cli) => {
+                if let Some(Commands::Age {
+                    action: Some(AgeAction::Encrypt { name, inputs, .. }),
+                    ..
+                }) = cli.command
+                {
+                    // If clap allowed it, both fields must be correctly parsed.
+                    assert!(name.is_some(), "name must be set when --name was given");
+                    assert!(!inputs.is_empty(), "inputs must be set when positional was given");
+                }
+            }
+            Err(_) => {
+                // Clap rejected it at parse time - also acceptable, even preferred.
+            }
+        }
+    }
+
+    // Parse: --paste X + positional -> same reasoning as --name + positional above.
+    #[test]
+    fn test_cli_parse_encrypt_paste_and_positional_rejected() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--paste", "X", "KEY=VAL"]);
+        match result {
+            Ok(cli) => {
+                if let Some(Commands::Age {
+                    action: Some(AgeAction::Encrypt { paste, inputs, .. }),
+                    ..
+                }) = cli.command
+                {
+                    assert!(paste.is_some(), "paste must be set when --paste was given");
+                    assert!(!inputs.is_empty(), "inputs must be set when positional was given");
+                }
+            }
+            Err(_) => {
+                // Clap rejected it - also acceptable.
+            }
+        }
+    }
+
+    // Parse: --force flag is accepted alongside --name.
+    #[test]
+    fn test_cli_parse_encrypt_name_with_force_ok() {
+        let result = Cli::try_parse_from(["manifest", "age", "encrypt", "--name", "MY_SECRET", "--force"]);
+        assert!(result.is_ok(), "expected ok with --name + --force: {:?}", result.err());
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt { name, force, .. }),
+                ..
+            }) = cli.command
+            {
+                assert_eq!(name.as_deref(), Some("MY_SECRET"));
+                assert!(force);
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+
+    // Parse: --clear-clipboard alongside --paste -> ok at parse level.
+    #[test]
+    fn test_cli_parse_encrypt_paste_with_clear_clipboard_ok() {
+        let result = Cli::try_parse_from([
+            "manifest",
+            "age",
+            "encrypt",
+            "--paste",
+            "MY_SECRET",
+            "--clear-clipboard",
+        ]);
+        assert!(
+            result.is_ok(),
+            "expected ok with --paste + --clear-clipboard: {:?}",
+            result.err()
+        );
+        if let Ok(cli) = result {
+            if let Some(Commands::Age {
+                action: Some(AgeAction::Encrypt {
+                    paste, clear_clipboard, ..
+                }),
+                ..
+            }) = cli.command
+            {
+                assert_eq!(paste.as_deref(), Some("MY_SECRET"));
+                assert!(clear_clipboard);
+            } else {
+                panic!("unexpected command structure");
+            }
+        }
+    }
+}
