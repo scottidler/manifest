@@ -67,9 +67,15 @@ fn linkspec_to_vec(spec: &config::LinkSpec, repo_root: &Path, cli: &Cli) -> Resu
                     if path.is_file() {
                         // Skip files whose source path falls under a dirs: entry - those
                         // subtrees are covered by a directory-level symlink instead.
+                        // Boundary-checked so sibling files sharing the dir's name prefix
+                        // (e.g. "voice-scrub-map.yml" next to a "voice" dir) are not skipped.
                         let rel_from_cwd = path.strip_prefix(cwd).unwrap_or(path);
                         let rel_str = rel_from_cwd.to_string_lossy();
-                        if spec.dirs.keys().any(|d| rel_str.starts_with(d.as_str())) {
+                        if spec
+                            .dirs
+                            .keys()
+                            .any(|d| rel_str.as_ref() == d.as_str() || rel_str.starts_with(&format!("{}/", d)))
+                        {
                             continue;
                         }
                         let rel = path.strip_prefix(&src_dir).unwrap_or(path);
@@ -785,6 +791,46 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].ends_with("/test/home/some/dir"));
+    }
+
+    #[test]
+    fn test_linkspec_to_vec_skip_respects_path_boundary() {
+        // A dirs: key of "a/b/voice" must not skip the sibling file
+        // "a/b/voice-scrub-map.yml", which merely shares a name prefix.
+        // It must still skip files actually under "a/b/voice/".
+        let tmp = TempDir::new().unwrap();
+        let repo_root = tmp.path().to_path_buf();
+        let base = repo_root.join("a/b");
+        let voice_dir = base.join("voice");
+        fs::create_dir_all(&voice_dir).unwrap();
+        fs::write(base.join("voice-scrub-map.yml"), "sibling").unwrap();
+        fs::write(voice_dir.join("inner.txt"), "inside").unwrap();
+
+        let mut items = HashMap::new();
+        items.insert("a/b".to_string(), "$HOME/a/b".to_string());
+        let mut dirs = HashMap::new();
+        dirs.insert("a/b/voice".to_string(), "$HOME/a/b/voice".to_string());
+        let spec = config::LinkSpec {
+            recursive: true,
+            dirs,
+            items,
+        };
+
+        let cli = make_cli("/test/home");
+        let lines = linkspec_to_vec(&spec, &repo_root, &cli).unwrap();
+
+        assert!(
+            lines.iter().any(|l| l.contains("voice-scrub-map.yml")),
+            "sibling file sharing the dir's name prefix must be linked, got: {:?}",
+            lines
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("voice/inner.txt") || l.contains("inner.txt")),
+            "file under the dirs: entry must be skipped (covered by the dir symlink), got: {:?}",
+            lines
+        );
     }
 
     fn setup_test_env() -> (TempDir, String) {
