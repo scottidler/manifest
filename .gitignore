@@ -19,3 +19,7 @@ target/
 # Added by cargo
 
 /target
+
+# local agent config, never committed
+.claude/
+.mcp.json
