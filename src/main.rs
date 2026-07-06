@@ -486,7 +486,9 @@ fn handle_age_command(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    setup_logging()?;
+    if let Err(e) = setup_logging() {
+        eprintln!("Warning: Failed to set up logging: {e}");
+    }
 
     // Handle subcommands first
     if let Some(command) = cli.command {
