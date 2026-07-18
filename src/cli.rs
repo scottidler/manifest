@@ -247,7 +247,18 @@ pub enum SecretsAction {
         #[arg(short = 'f', long = "format", default_value = "export")]
         format: DecryptFormat,
     },
-    // `deploy` (the `secrets.file` lane) is added in Phase 3.
+
+    /// Decrypt each `secrets.file` entry and atomically write it to its
+    /// destination path at mode 0600. Native Rust: the decrypted bytes never
+    /// pass through generated Bash, stdout, or a process argument. Per-file
+    /// atomic; a failed entry is reported and the rest still deploy; the command
+    /// exits non-zero if any entry failed.
+    Deploy {
+        /// Print the planned `name -> path` for each entry and decrypt nothing,
+        /// write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

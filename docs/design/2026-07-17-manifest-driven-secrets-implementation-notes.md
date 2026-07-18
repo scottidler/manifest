@@ -164,3 +164,79 @@ edit history.
 
 ### Open questions
 - None.
+
+## Phase 3: secrets deploy file lane (native Rust)
+
+### Design decisions
+- Native deploy lives entirely in `src/age.rs`, NOT the `ManifestType` render-to-Bash
+  path. Decrypted bytes reach ONLY the destination file - never stdout, a generated
+  Bash string, or a process arg. Five functions:
+  - `create_secret_temp(dir, base)` (`src/age.rs`) - opens the temp at
+    `SECRET_FILE_MODE` (`0600`) FROM CREATION via `OpenOptionsExt::mode` +
+    `create_new(true)`, in the destination's OWN directory. Not `encrypt_named`'s
+    `0644`-then-nothing nor `generate_identity`'s chmod-after; this closes the
+    world-readable plaintext window the design flags.
+  - `ensure_secret_parent(parent)` - `symlink_metadata` on the LITERAL parent path
+    to refuse a symlinked parent; if the parent is missing, `DirBuilderExt::mode`
+    (`0700`) + recursive `create`, then asserts the resulting mode is `0700`.
+  - `write_secret_file(dest, bytes)` - ensure parent -> temp at `0600` -> write ->
+    `sync_all` -> `rename` over dest -> final `set_permissions(0600)` -> `fsync`
+    the parent dir. Temp removed on any failure; dest untouched.
+  - `deploy_secret_file(name, dest, secrets_dir, identity)` - `decrypt_file`
+    `<secrets_dir>/<name>.age` in-process, then `write_secret_file`.
+  - `deploy_secret_files(entries, secrets_dir, identity) -> DeployReport` - batch
+    loop, per-file atomic, report-and-continue; returns a `DeployReport { deployed,
+    failed }` as DATA (no printing, no exit) so the shell owns stdout/stderr/exit.
+- `SECRET_FILE_MODE` had its `#[allow(dead_code)]` REMOVED (Phase 1 marked it
+  explicitly temporary until a Phase 3 call site existed). Added a sibling
+  `const SECRET_DIR_MODE: u32 = 0o700;` for the parent-dir mode rather than a bare
+  `0o700` literal (per rust.md "no magic numbers").
+- `secrets_deploy(config, dry_run)` (`src/main.rs`) dispatched from
+  `handle_secrets_command` next to the Phase 2 `Env` handler. It loads the manifest,
+  resolves the secrets dir via the shared `resolve_secrets_dir`, sorts the
+  `secrets.file` entries by name (a `HashMap` iterates non-deterministically), and:
+  - `--dry-run`: prints `name -> path` per entry and returns BEFORE resolving an
+    identity or reading any ciphertext (decrypts nothing, writes nothing).
+  - otherwise: resolves the identity, calls `deploy_secret_files`, prints
+    `deployed: name -> path` for each success and `manifest: failed to deploy secret
+    '<name>': <err>` to stderr for each failure, and returns `Err` (non-zero exit)
+    if ANY entry failed.
+- CLI: `SecretsAction::Deploy { dry_run: bool }` with `--dry-run` (`src/cli.rs`),
+  replacing the Phase 2 `// deploy in Phase 3` placeholder comment.
+
+### Deviations
+- The design's Phase 3 bullet lists the deploy step as one inline sequence; it is
+  implemented as four seams (`create_secret_temp`, `ensure_secret_parent`,
+  `write_secret_file`, `deploy_secret_file`) plus the batch `deploy_secret_files`.
+  Same effect, correct seams: the split makes the two load-bearing invariants
+  (temp `0600`-at-creation; parent `0700`/symlink-refusal) unit-testable in
+  isolation without a real identity or a decrypt.
+- The batch loop returns a `DeployReport` (data) and `main.rs` maps a non-empty
+  `failed` list to a non-zero exit, rather than the loop itself performing the
+  report-and-exit. This keeps age.rs side-effect-free (rust.md "return structured
+  data, not side effects") and lets the mid-batch test assert continuation with a
+  throwaway identity. Same "report-and-continue, non-zero exit if any failed"
+  behavior the design specifies.
+
+### Tradeoffs
+- The final `set_permissions(0600)` after rename is redundant with the temp's
+  creation mode (the temp is already `0600` and `rename` preserves it), but kept
+  as the design's explicit "chmod final 0600" step - it also normalizes a
+  pre-existing destination whose mode differed. The security guarantee rests on the
+  CREATION mode, not this chmod.
+- `ensure_secret_parent` asserts `0700` only for a parent it CREATED; a pre-existing
+  parent's mode is left alone (a legitimate `~/.config/syncthing` may be `0755`).
+  Refusing a non-`0700` existing parent would break real destinations for no
+  security gain, since the file itself is `0600` regardless.
+- The symlink refusal checks only the IMMEDIATE literal parent (per the design); a
+  symlinked deeper ancestor and the residual check-to-write TOCTOU are out of scope
+  for this threat model (a local attacker who can plant a symlink under `~/.ssh`
+  already has profile write access), as the design's Security section states.
+- The "plaintext never in stdout" criterion is proven via
+  `test_deploy_report_carries_no_plaintext` (the report the caller prints carries
+  only names/paths/errors, never a value) rather than capturing process stdout,
+  which is not cleanly doable in a unit test. The guarantee is structural: the only
+  things `secrets_deploy` prints are report names + declared dest paths.
+
+### Open questions
+- None.

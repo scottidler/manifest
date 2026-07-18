@@ -493,7 +493,72 @@ fn handle_secrets_command(config: Option<String>, action: SecretsAction) -> Resu
     debug!("handle_secrets_command: action={:?}", action);
     match action {
         SecretsAction::Env { format } => secrets_env(config, &format),
+        SecretsAction::Deploy { dry_run } => secrets_deploy(config, dry_run),
     }
+}
+
+/// `manifest secrets deploy [--dry-run]`: decrypt each `secrets.file` entry and
+/// atomically write it to its destination path at `0600` (native Rust; the
+/// decrypted bytes never pass through generated Bash or stdout).
+///
+/// `--dry-run` prints the planned `name -> path` for each entry and decrypts
+/// NOTHING, writes NOTHING - it returns before any identity is resolved or any
+/// ciphertext is read, so a corrupt/undecryptable entry cannot error under
+/// `--dry-run`.
+///
+/// Batch semantics (non-dry-run): per-file atomic with report-and-continue - a
+/// failed entry is reported to stderr + the log, the rest still deploy, and the
+/// command exits non-zero if ANY entry failed. Entries are deployed in sorted
+/// name order for deterministic, diffable output.
+fn secrets_deploy(config: Option<String>, dry_run: bool) -> Result<()> {
+    debug!("secrets_deploy: dry_run={}", dry_run);
+    let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
+    let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
+
+    // Deterministic order: a HashMap iterates in a different order every run.
+    let mut entries: Vec<(String, String)> = spec
+        .secrets
+        .file
+        .iter()
+        .map(|(name, dest)| (name.clone(), dest.clone()))
+        .collect();
+    entries.sort();
+    debug!(
+        "secrets_deploy: entries={} secrets_dir={}",
+        entries.len(),
+        secrets_dir.display()
+    );
+
+    if dry_run {
+        for (name, dest) in &entries {
+            println!("{} -> {}", name, dest);
+        }
+        debug!("secrets_deploy: dry-run printed {} planned entries", entries.len());
+        return Ok(());
+    }
+
+    let identity = age::resolve_identity(None)?;
+    let report = age::deploy_secret_files(&entries, &secrets_dir, identity.as_ref());
+
+    // Report each entry by name/path only - never a decrypted value.
+    for name in &report.deployed {
+        if let Some((_, dest)) = entries.iter().find(|(n, _)| n == name) {
+            println!("deployed: {} -> {}", name, dest);
+        }
+    }
+    for (name, err) in &report.failed {
+        eprintln!("manifest: failed to deploy secret '{}': {}", name, err);
+    }
+
+    if !report.failed.is_empty() {
+        return Err(eyre::eyre!(
+            "{} of {} secret(s) failed to deploy",
+            report.failed.len(),
+            entries.len()
+        ));
+    }
+    debug!("secrets_deploy: all {} entries deployed", report.deployed.len());
+    Ok(())
 }
 
 /// Resolve the directory holding the `.age` ciphertext files for `secrets env`.
@@ -1092,5 +1157,31 @@ mod tests {
         let bad = write_manifest(tmp.path(), "secrets:\n  bogus: x\n");
         let result = secrets_env(Some(bad.to_string_lossy().into_owned()), &DecryptFormat::Export);
         assert!(result.is_err(), "command-level failure must return Err (non-zero exit)");
+    }
+
+    // ---- Phase 3: secrets deploy --dry-run ----
+
+    #[test]
+    fn test_secrets_deploy_dry_run_writes_and_decrypts_nothing() {
+        // --dry-run must return Ok, create NO destination file, and decrypt
+        // nothing. We point a file entry at a dest under a non-existent parent AND
+        // provide NO backing .age (the store dir does not even exist), so if
+        // dry-run tried to decrypt or write it would error or create the parent.
+        // It does neither: it returns before resolving an identity or reading any
+        // ciphertext.
+        let tmp = TempDir::new().unwrap();
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("subdir").join("signing");
+
+        let manifest = format!("secrets:\n  file:\n    work-signing-key: {}\n", dest.to_string_lossy());
+        let path = write_manifest(tmp.path(), &manifest);
+
+        let result = secrets_deploy(Some(path.to_string_lossy().into_owned()), true);
+        assert!(result.is_ok(), "dry-run must succeed: {:?}", result.err());
+        assert!(!dest.exists(), "dry-run must write no destination file");
+        assert!(
+            !dest.parent().unwrap().exists(),
+            "dry-run must not create the parent directory"
+        );
     }
 }

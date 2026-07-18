@@ -19,10 +19,14 @@ use walkdir::WalkDir;
 /// Mode a `secrets.file` destination (and its temp file, from creation) is
 /// written at. Per-entry override is explicitly deferred (see design doc); a
 /// single hardcoded mode keeps `secrets.file` values a homogeneous path
-/// string rather than a `{path, mode}` map. Unused until Phase 3 wires the
-/// `secrets deploy` lane that writes at this mode.
-#[allow(dead_code)]
+/// string rather than a `{path, mode}` map. Wired by the `secrets deploy` lane
+/// (`deploy_secret_file` / `create_secret_temp`).
 const SECRET_FILE_MODE: u32 = 0o600;
+
+/// Mode a `secrets.file` destination's parent directory is created at when it
+/// does not already exist (a fresh machine has no `~/.ssh/identities/work/`).
+/// Owner-only `rwx`; robust against any typical umask (umask never adds bits).
+const SECRET_DIR_MODE: u32 = 0o700;
 
 // ============ ENCRYPTION ============
 
@@ -1256,6 +1260,220 @@ pub fn render_secrets_env(
     output
 }
 
+// ============ SECRETS DEPLOY (file lane) ============
+
+/// Outcome of deploying a batch of `secrets.file` entries.
+///
+/// Returned as DATA (not printed) so the caller owns all stdout/stderr and the
+/// exit code. `deployed` holds the names successfully written; `failed` holds
+/// `(name, error message)` for each entry that failed. Neither field ever
+/// carries a decrypted secret value - only names, paths, and error text.
+#[derive(Debug, Default)]
+pub struct DeployReport {
+    pub deployed: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Create the temp file for a secret in `dir`, opened at [`SECRET_FILE_MODE`]
+/// (`0600`) **from creation** via `OpenOptionsExt::mode` - never a broader mode
+/// followed by a chmod (`encrypt_named`'s temp is `0644`; `generate_identity`
+/// chmods after write - both leave a world-readable plaintext window this path
+/// deliberately avoids). `dir` MUST be the destination's own directory so the
+/// later `rename` is same-filesystem. Returns the open handle and the temp path.
+///
+/// `0600 & ~umask` can only *narrow* the mode, so the temp is never broader than
+/// `0600` at any instant.
+fn create_secret_temp(dir: &Path, base: &str) -> Result<(fs::File, PathBuf)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp_name = format!(".{}.tmp-{}", base, std::process::id());
+    let tmp_path = dir.join(&tmp_name);
+    debug!(
+        "create_secret_temp: tmp_path={} mode={:o}",
+        tmp_path.display(),
+        SECRET_FILE_MODE
+    );
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(SECRET_FILE_MODE)
+        .open(&tmp_path)
+        .wrap_err_with(|| format!("failed to create temp file '{}'", tmp_path.display()))?;
+    Ok((file, tmp_path))
+}
+
+/// Ensure the parent directory of a `secrets.file` destination is safe to write
+/// into.
+///
+/// - **Refuse a symlinked parent** present at check time: `symlink_metadata` on
+///   the LITERAL parent path (NOT `canonicalize().is_symlink()`, which is always
+///   false because canonicalize resolves the symlink first). A planted symlink
+///   therefore cannot redirect the write. A residual check-to-write TOCTOU
+///   remains and is out of scope for this threat model (see design doc Security).
+/// - **Create the parent at [`SECRET_DIR_MODE`] (`0700`) if missing** via
+///   `DirBuilderExt::mode` + recursive `create` (plain `create_dir_all` applies
+///   `0777 & umask`, NOT `0700`), then assert the resulting mode is `0700`.
+fn ensure_secret_parent(parent: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    debug!("ensure_secret_parent: parent={}", parent.display());
+    match fs::symlink_metadata(parent) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(eyre!(
+                    "refusing to deploy: parent directory '{}' is a symlink; \
+                     a symlinked parent could redirect the write to another location",
+                    parent.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(eyre!(
+                    "parent path '{}' exists but is not a directory",
+                    parent.display()
+                ));
+            }
+            debug!("ensure_secret_parent: existing non-symlink dir, ok");
+            Ok(())
+        }
+        Err(_) => {
+            // Parent (or an ancestor) does not exist -> create at 0700.
+            debug!(
+                "ensure_secret_parent: parent missing, creating at {:o}",
+                SECRET_DIR_MODE
+            );
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(SECRET_DIR_MODE)
+                .create(parent)
+                .wrap_err_with(|| format!("failed to create parent directory '{}'", parent.display()))?;
+            let mode = fs::metadata(parent)
+                .wrap_err_with(|| format!("failed to stat created parent '{}'", parent.display()))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != SECRET_DIR_MODE {
+                return Err(eyre!(
+                    "parent directory '{}' created with mode {:o}, expected {:o}",
+                    parent.display(),
+                    mode,
+                    SECRET_DIR_MODE
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Atomically write `bytes` to `dest` at [`SECRET_FILE_MODE`] (`0600`).
+///
+/// Sequence: ensure the parent (refuse symlink / create at `0700`) -> temp file
+/// created at `0600` from creation IN the destination's own directory -> write
+/// -> `sync_all` -> `rename` over `dest` -> chmod final `0600` (belt-and-
+/// suspenders; the temp was already `0600`) -> `fsync` the parent directory so
+/// the rename is durable. On any failure the temp file is removed and `dest` is
+/// left untouched.
+fn write_secret_file(dest: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    debug!("write_secret_file: dest={} bytes={}", dest.display(), bytes.len());
+
+    let parent = dest
+        .parent()
+        .ok_or_else(|| eyre!("destination '{}' has no parent directory", dest.display()))?;
+    ensure_secret_parent(parent)?;
+
+    let base = dest
+        .file_name()
+        .ok_or_else(|| eyre!("destination '{}' has no file name", dest.display()))?
+        .to_string_lossy()
+        .into_owned();
+
+    let (mut file, tmp_path) = create_secret_temp(parent, &base)?;
+
+    // Write + sync; remove the temp on any failure.
+    let write_result = (|| -> Result<()> {
+        file.write_all(bytes)
+            .wrap_err("failed to write secret bytes to temp file")?;
+        file.sync_all().wrap_err("failed to sync temp file to disk")?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Atomic replace of the destination.
+    if let Err(e) =
+        fs::rename(&tmp_path, dest).wrap_err_with(|| format!("failed to rename temp file into '{}'", dest.display()))
+    {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Final chmod to 0600 (the temp was already 0600 from creation; this makes
+    // the invariant explicit and covers a pre-existing dest whose mode differed).
+    fs::set_permissions(dest, fs::Permissions::from_mode(SECRET_FILE_MODE))
+        .wrap_err_with(|| format!("failed to chmod '{}' to {:o}", dest.display(), SECRET_FILE_MODE))?;
+
+    // fsync the parent directory so the rename survives a crash.
+    let dir = fs::File::open(parent)
+        .wrap_err_with(|| format!("failed to open parent dir '{}' for fsync", parent.display()))?;
+    dir.sync_all()
+        .wrap_err_with(|| format!("failed to fsync parent dir '{}'", parent.display()))?;
+
+    debug!("write_secret_file: wrote {} bytes to {}", bytes.len(), dest.display());
+    Ok(())
+}
+
+/// Decrypt `<secrets_dir>/<name>.age` in-process and atomically deploy it to
+/// `dest` at `0600`. The decrypted bytes go ONLY to the destination file - never
+/// to stdout, a generated Bash string, or a process argument (this is the whole
+/// reason the file lane is native Rust and not the `ManifestType` render path).
+pub fn deploy_secret_file(name: &str, dest: &Path, secrets_dir: &Path, identity: &dyn Identity) -> Result<()> {
+    debug!(
+        "deploy_secret_file: name={} dest={} secrets_dir={}",
+        name,
+        dest.display(),
+        secrets_dir.display()
+    );
+    let cipher_path = secrets_dir.join(format!("{}.age", name));
+    let plaintext = decrypt_file(&cipher_path, identity)
+        .wrap_err_with(|| format!("failed to decrypt secret '{}' ({})", name, cipher_path.display()))?;
+    write_secret_file(dest, &plaintext)?;
+    debug!("deploy_secret_file: deployed name={} ({} bytes)", name, plaintext.len());
+    Ok(())
+}
+
+/// Deploy every `(name, dest)` entry, per-file atomic with report-and-continue
+/// semantics: a failed entry is recorded and the rest still deploy. Returns a
+/// [`DeployReport`] as data; the caller prints and maps a non-empty `failed`
+/// list to a non-zero exit. Never decrypts unless called (the `--dry-run` path
+/// does not reach here).
+pub fn deploy_secret_files(entries: &[(String, String)], secrets_dir: &Path, identity: &dyn Identity) -> DeployReport {
+    debug!(
+        "deploy_secret_files: entries={} secrets_dir={}",
+        entries.len(),
+        secrets_dir.display()
+    );
+    let mut report = DeployReport::default();
+    for (name, dest) in entries {
+        match deploy_secret_file(name, Path::new(dest), secrets_dir, identity) {
+            Ok(()) => {
+                debug!("deploy_secret_files: ok name={}", name);
+                report.deployed.push(name.clone());
+            }
+            Err(e) => {
+                warn!("deploy_secret_files: failed name={} dest={}: {}", name, dest, e);
+                report.failed.push((name.clone(), e.to_string()));
+            }
+        }
+    }
+    debug!(
+        "deploy_secret_files: deployed={} failed={}",
+        report.deployed.len(),
+        report.failed.len()
+    );
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2478,6 +2696,210 @@ mod tests {
         assert_eq!(
             new_set, legacy_set,
             "export SET must match legacy sweep\nnew={new_out}\nlegacy={legacy_out}"
+        );
+    }
+
+    // ---- Phase 3: secrets deploy (file lane) ----
+    //
+    // Fixtures use a THROWAWAY x25519 identity generated inside each test, never
+    // the real ~/.config/manifest/identity.txt. `encrypt_secret_into` (above)
+    // writes `<dir>/<name>.age` for a given throwaway recipient.
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn test_deploy_secret_file_writes_0600() {
+        // The deployed destination file must be exactly 0600 and contain the
+        // decrypted bytes.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let store = tempfile::TempDir::new().unwrap();
+        let dest_dir = tempfile::TempDir::new().unwrap();
+
+        let plaintext = b"passphraseless-signing-key-material";
+        encrypt_secret_into(store.path(), "work-signing-key", plaintext, &recipient);
+        let dest = dest_dir.path().join("signing");
+
+        deploy_secret_file("work-signing-key", &dest, store.path(), &identity).unwrap();
+
+        assert!(dest.exists(), "destination must be written");
+        assert_eq!(mode_of(&dest), 0o600, "deployed file must be mode 0600");
+        assert_eq!(std::fs::read(&dest).unwrap(), plaintext, "bytes must match plaintext");
+    }
+
+    #[test]
+    fn test_create_secret_temp_is_0600_from_creation() {
+        // The temp file must be 0600 the instant it is created (before any write
+        // or rename), proven via the CREATION mode - not a post-hoc chmod. If the
+        // `.mode(SECRET_FILE_MODE)` were dropped, the temp would open at 0666&~umask
+        // (typically 0644) and this assertion would fail.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (file, tmp_path) = create_secret_temp(dir.path(), "signing").unwrap();
+        // Stat immediately, while the handle is still open and nothing has been
+        // renamed: this is the "at any instant" window the design guards.
+        assert!(tmp_path.exists(), "temp file must exist right after creation");
+        assert_eq!(
+            mode_of(&tmp_path),
+            0o600,
+            "temp file must be 0600 from creation, before any write or rename"
+        );
+        drop(file);
+    }
+
+    #[test]
+    fn test_deploy_creates_parent_at_0700() {
+        // A missing parent (and any missing ancestors) is created at 0700, and the
+        // deployed file lands at 0600 inside it.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let store = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(store.path(), "work-signing-key", b"key-bytes", &recipient);
+
+        // Neither `identities` nor `identities/work` exists yet.
+        let parent = root.path().join("identities").join("work");
+        let dest = parent.join("signing");
+        assert!(!parent.exists());
+
+        deploy_secret_file("work-signing-key", &dest, store.path(), &identity).unwrap();
+
+        assert_eq!(mode_of(&parent), 0o700, "created parent must be 0700");
+        assert_eq!(
+            mode_of(&root.path().join("identities")),
+            0o700,
+            "created intermediate ancestor must be 0700"
+        );
+        assert_eq!(mode_of(&dest), 0o600, "deployed file must be 0600");
+    }
+
+    #[test]
+    fn test_deploy_refuses_symlinked_parent() {
+        // A symlinked parent directory present at check time is refused; the write
+        // must NOT go through the link into the real directory.
+        use std::os::unix::fs::symlink;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let store = tempfile::TempDir::new().unwrap();
+        let base = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(store.path(), "work-signing-key", b"key-bytes", &recipient);
+
+        let real_dir = base.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_dir = base.path().join("link");
+        symlink(&real_dir, &link_dir).unwrap();
+
+        // dest's parent is the symlink `link` -> refuse.
+        let dest = link_dir.join("signing");
+        let result = deploy_secret_file("work-signing-key", &dest, store.path(), &identity);
+        assert!(result.is_err(), "symlinked parent must be refused");
+        assert!(
+            result.unwrap_err().to_string().contains("symlink"),
+            "error should name the symlink refusal"
+        );
+
+        // Nothing was written through the link into the real directory.
+        assert!(
+            !real_dir.join("signing").exists(),
+            "no file may be written through the symlinked parent"
+        );
+    }
+
+    #[test]
+    fn test_deploy_decrypt_failure_leaves_no_partial() {
+        // A per-entry decrypt failure (ciphertext for a DIFFERENT recipient) must
+        // leave ZERO partial file at the destination and no temp file behind.
+        let identity = age::x25519::Identity::generate();
+        let other = age::x25519::Identity::generate();
+        let other_recipient = other.to_public();
+        let store = tempfile::TempDir::new().unwrap();
+        let dest_dir = tempfile::TempDir::new().unwrap();
+
+        // `bad.age` is encrypted to a recipient our identity cannot decrypt.
+        encrypt_secret_into(store.path(), "bad", b"unreadable", &other_recipient);
+        let dest = dest_dir.path().join("bad-out");
+
+        let result = deploy_secret_file("bad", &dest, store.path(), &identity);
+        assert!(result.is_err(), "undecryptable entry must fail");
+        assert!(!dest.exists(), "no partial destination file may be left");
+
+        // No leftover temp file in the destination directory.
+        let temps: Vec<_> = std::fs::read_dir(dest_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(temps.is_empty(), "temp file left behind: {:?}", temps);
+    }
+
+    #[test]
+    fn test_deploy_secret_files_midbatch_failure_continues_and_reports() {
+        // A mid-batch failure is reported and the rest still deploy: the good entry
+        // is written (0600, correct bytes), the bad entry has no file, and the
+        // report's `failed` list is non-empty (drives a non-zero exit in main.rs).
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let other = age::x25519::Identity::generate();
+        let other_recipient = other.to_public();
+
+        let store = tempfile::TempDir::new().unwrap();
+        let dest_dir = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(store.path(), "good", b"good-value", &recipient);
+        encrypt_secret_into(store.path(), "bad", b"bad-value", &other_recipient);
+
+        let good_dest = dest_dir.path().join("good-out");
+        let bad_dest = dest_dir.path().join("bad-out");
+        // Sorted order: "bad" precedes "good" - the failure comes FIRST, proving the
+        // batch continues past it.
+        let entries = vec![
+            ("bad".to_string(), bad_dest.to_string_lossy().into_owned()),
+            ("good".to_string(), good_dest.to_string_lossy().into_owned()),
+        ];
+
+        let report = deploy_secret_files(&entries, store.path(), &identity);
+
+        assert_eq!(report.deployed, vec!["good".to_string()], "good entry must deploy");
+        assert_eq!(report.failed.len(), 1, "bad entry must be recorded as failed");
+        assert_eq!(report.failed[0].0, "bad");
+
+        assert!(
+            good_dest.exists(),
+            "good entry must be written despite the earlier failure"
+        );
+        assert_eq!(mode_of(&good_dest), 0o600);
+        assert_eq!(std::fs::read(&good_dest).unwrap(), b"good-value");
+        assert!(!bad_dest.exists(), "failed entry must leave no file");
+    }
+
+    #[test]
+    fn test_deploy_report_carries_no_plaintext() {
+        // The decrypted bytes must reach ONLY the destination file - never the
+        // returned report (which the caller prints to stdout). Grepping the whole
+        // report for the known plaintext must find nothing.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let store = tempfile::TempDir::new().unwrap();
+        let dest_dir = tempfile::TempDir::new().unwrap();
+
+        let secret = "TOP-SECRET-PLAINTEXT-MARKER-98765";
+        encrypt_secret_into(store.path(), "work-signing-key", secret.as_bytes(), &recipient);
+        let dest = dest_dir.path().join("signing");
+        let entries = vec![("work-signing-key".to_string(), dest.to_string_lossy().into_owned())];
+
+        let report = deploy_secret_files(&entries, store.path(), &identity);
+
+        // The bytes are in the file...
+        assert_eq!(std::fs::read(&dest).unwrap(), secret.as_bytes());
+        // ...and NOT anywhere in the report the caller would print.
+        let rendered = format!("{:?} {:?}", report.deployed, report.failed);
+        assert!(
+            !rendered.contains(secret),
+            "plaintext must not appear in the deploy report: {rendered}"
         );
     }
 }
