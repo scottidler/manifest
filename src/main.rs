@@ -513,6 +513,10 @@ fn handle_secrets_command(config: Option<String>, action: SecretsAction) -> Resu
 fn secrets_deploy(config: Option<String>, dry_run: bool) -> Result<()> {
     debug!("secrets_deploy: dry_run={}", dry_run);
     let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
+    // Fail-closed: reject any name that is not a bare identifier BEFORE dry-run
+    // print or any decrypt/write, so a key like `../evil` can never join a path
+    // outside `.secrets/`. Same check the env lane and `encrypt_named` apply.
+    age::validate_secret_names(spec.secrets.file.keys().map(String::as_str))?;
     let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
 
     // Deterministic order: a HashMap iterates in a different order every run.
@@ -606,6 +610,10 @@ fn secrets_env_banner(declared: Option<usize>) -> String {
 fn secrets_env_context(config: Option<String>) -> Result<(ManifestSpec, PathBuf)> {
     debug!("secrets_env_context: config={:?}", config);
     let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
+    // Fail-closed: reject any name that is not a bare identifier BEFORE resolving
+    // the store or touching an identity, so a name like `../evil` can never join
+    // a path outside `.secrets/`. Command-level error -> zero stdout in `secrets_env`.
+    age::validate_secret_names(spec.secrets.env.iter().map(String::as_str))?;
     let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
     debug!(
         "secrets_env_context: env_count={} secrets_dir={}",
@@ -671,7 +679,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Err(e) = setup_logging() {
-        eprintln!("Warning: Failed to set up logging: {e}");
+        // TTY-gate: `.zshenv` runs this on every shell incl. non-interactive
+        // (scp/rsync/git-over-ssh); unguarded stderr there breaks those channels.
+        // Mirrors the interactive gate on the `secrets env` failure banner.
+        if std::io::stderr().is_terminal() {
+            eprintln!("Warning: Failed to set up logging: {e}");
+        }
     }
 
     // Handle subcommands first
@@ -1182,6 +1195,44 @@ mod tests {
         assert!(
             !dest.parent().unwrap().exists(),
             "dry-run must not create the parent directory"
+        );
+    }
+
+    // ---- audit fix: non-bare secret names are rejected up-front (command-level) ----
+
+    #[test]
+    fn test_secrets_env_context_rejects_non_bare_name() {
+        // A `secrets.env` entry that is not a bare identifier would `join` a
+        // ciphertext path outside `.secrets/`. It must be rejected at config time,
+        // BEFORE any identity/decrypt -> command-level error -> zero stdout in
+        // `secrets_env`. Remove the `validate_secret_names` call and this fails.
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(tmp.path(), "secrets:\n  env:\n    - ../../other-store/key\n");
+        let result = secrets_env_context(Some(path.to_string_lossy().into_owned()));
+        assert!(result.is_err(), "a non-bare secrets.env name must be rejected");
+    }
+
+    #[test]
+    fn test_secrets_env_context_accepts_bare_names() {
+        // Contrast case: valid bare identifiers must NOT be rejected by validation
+        // (proves the reject test above bites on the name shape, not on load).
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(tmp.path(), "secrets:\n  env:\n    - github-pat-home\n    - gh-token\n");
+        let result = secrets_env_context(Some(path.to_string_lossy().into_owned()));
+        assert!(result.is_ok(), "bare names must pass validation: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_secrets_deploy_rejects_non_bare_key_even_in_dry_run() {
+        // A `secrets.file` KEY that is not a bare identifier must be rejected before
+        // the dry-run print (and before any decrypt/write). dry_run=true needs no
+        // identity, so this isolates the name-validation wiring on the deploy lane.
+        let tmp = TempDir::new().unwrap();
+        let path = write_manifest(tmp.path(), "secrets:\n  file:\n    ../evil: /tmp/pwned\n");
+        let result = secrets_deploy(Some(path.to_string_lossy().into_owned()), true);
+        assert!(
+            result.is_err(),
+            "a non-bare secrets.file key must be rejected even in dry-run"
         );
     }
 }

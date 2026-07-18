@@ -702,6 +702,22 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate every declared secret name up-front, as command-level config
+/// validation. A name is a bare identifier -- `validate_name` rejects empty,
+/// path separators, and any `.` -- so this runs BEFORE any decrypt/emit/write
+/// in both the `secrets env` and `secrets deploy` lanes. Without it a name like
+/// `../../other-store/key` would `join` a ciphertext path OUTSIDE the declared
+/// `.secrets/` store, silently breaking the "bare name -> <store>/<name>.age"
+/// contract. Fail-closed: the first malformed name is a command-level error, so
+/// the emit lane produces zero stdout and a non-zero exit. Mirrors the check
+/// `encrypt_named` already applies, so all three lanes behave identically.
+pub(crate) fn validate_secret_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    for name in names {
+        validate_name(name)?;
+    }
+    Ok(())
+}
+
 /// Outcome of a round-trip verification of a freshly-written ciphertext file.
 ///
 /// The three outcomes are deliberately distinct so the caller can fail safe:
@@ -1963,6 +1979,21 @@ mod tests {
     fn test_validate_name_valid_lowercase() {
         // Lowercase identifiers are also valid names.
         assert!(validate_name("my-secret").is_ok());
+    }
+
+    // ---- validate_secret_names (bulk up-front check for the env/deploy lanes) ----
+
+    #[test]
+    fn test_validate_secret_names_all_valid() {
+        assert!(validate_secret_names(["github-pat-home", "gh-token", "my-secret"]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_secret_names_rejects_first_bad() {
+        // A single non-bare name in the set fails the whole check (fail-closed).
+        assert!(validate_secret_names(["ok-name", "../../other-store/key"]).is_err());
+        assert!(validate_secret_names(["has.dot"]).is_err());
+        assert!(validate_secret_names([""]).is_err());
     }
 
     // ---- encrypt_named ----

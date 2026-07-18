@@ -240,3 +240,39 @@ edit history.
 
 ### Open questions
 - None.
+
+## Audit fixes (post-v0.4.0, Mode-2 implementation audit of phases 0-3)
+
+### Design decisions
+- Both audit findings folded in as a fix-forward on shipped v0.4.0, BEFORE Phase 4
+  declares any names -- so the bug class cannot reach live use.
+- Finding 1 (up-front name validation): added `validate_secret_names` (`age.rs`,
+  right after `validate_name`) and wired it into BOTH dispatch handlers as
+  command-level config validation -- `secrets_env_context` (`main.rs`, before the
+  store/identity, so the `Err` gives `secrets_env` zero stdout) and `secrets_deploy`
+  (`main.rs`, before the dry-run branch, so a bad key is rejected even under
+  `--dry-run`). Reuses the existing `validate_name` (rejects empty / `/` / `\` /
+  any `.`). This closes the sibling inconsistency: `encrypt_named` validated,
+  the two new lanes did not. Verified empirically: `secrets env` and
+  `secrets deploy --dry-run` on a `../../other-store/key` name both exit 1 with
+  zero stdout and a loud error.
+- Finding 2 (logging-warn stderr): TTY-gated the `setup_logging()` failure
+  `eprintln!` (`main.rs` `main()`) behind `std::io::stderr().is_terminal()`,
+  mirroring the `secrets env` banner gate, so an unwritable log dir cannot spew to
+  a non-interactive `.zshenv` shell (scp/rsync/git-over-ssh).
+
+### Deviations
+- None from the design doc's intent. The doc's Data Model already states "a bare
+  name resolves to its ciphertext at `<dir-of-manifest.yml>/.secrets/<name>.age`";
+  validation makes that contract enforced rather than assumed. A Resolved Decision
+  recording the validate-and-fail-closed policy was added to the design doc.
+
+### Tradeoffs
+- Validated in the dispatch handlers (`main.rs`) rather than inside
+  `render_secrets_env`/`deploy_secret_file` (`age.rs`): the emit function returns a
+  `String` and cannot surface a command-level error, and a bad name is a config
+  fault (fail whole command), not a per-secret skip. Up-front validation keeps the
+  two failure classes distinct.
+
+### Open questions
+- None.

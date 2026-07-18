@@ -473,6 +473,16 @@ the gate is ever mis-sequenced.
   migration + live-unit regeneration (Phase 5) is committable and probeable
   independently of deleting the poison + dir-usage (Phase 6), which is gated on a
   grep proving no consumer remains. (Panel R3.)
+- **2026-07-18: Every declared secret name is validated as a bare identifier,
+  up-front, fail-closed.** Both new lanes `join` `<store>/<name>.age` from the raw
+  manifest name; without validation a `secrets.env` entry or `secrets.file` key
+  like `../../other-store/key` sources ciphertext OUTSIDE the declared `.secrets/`
+  store, silently breaking the "bare name -> `<store>/<name>.age`" contract. The
+  existing `validate_name` (rejects empty / `/` / `\` / any `.`) now runs on every
+  `secrets.env` entry and every `secrets.file` key BEFORE any decrypt/emit/write --
+  a command-level error (zero stdout on the env lane), consistent with
+  `encrypt_named`. (Implementation audit of phases 0-3; shipped as the v0.4.0
+  follow-up.)
 
 ## Alternatives Considered
 
