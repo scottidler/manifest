@@ -6,7 +6,7 @@ mod config;
 mod fuzzy;
 mod manifest;
 
-use crate::cli::{AgeAction, Cli, Commands, DecryptFormat};
+use crate::cli::{AgeAction, Cli, Commands, DecryptFormat, SecretsAction};
 use crate::config::*;
 use crate::fuzzy::*;
 use crate::manifest::{ManifestType, build_script};
@@ -489,6 +489,119 @@ fn handle_age_command(
     }
 }
 
+fn handle_secrets_command(config: Option<String>, action: SecretsAction) -> Result<()> {
+    debug!("handle_secrets_command: action={:?}", action);
+    match action {
+        SecretsAction::Env { format } => secrets_env(config, &format),
+    }
+}
+
+/// Resolve the directory holding the `.age` ciphertext files for `secrets env`.
+///
+/// Order: an explicit `secrets-store` from the manifest (already tilde-expanded in
+/// `load_manifest_spec`), else `<dir-of-manifest.yml>/.secrets` - the default
+/// sibling store. Mirrors how `link:` resolves sources relative to the repo root:
+/// the loaded manifest's own path gives the store location, so no store path needs
+/// declaring for the common case.
+fn resolve_secrets_dir(spec: &ManifestSpec, config_path: &Path) -> Result<PathBuf> {
+    debug!("resolve_secrets_dir: config_path={}", config_path.display());
+    if let Some(store) = &spec.secrets_store {
+        debug!("resolve_secrets_dir: using secrets-store override {}", store.display());
+        return Ok(store.clone());
+    }
+    let dir = config_path
+        .parent()
+        .ok_or_else(|| eyre::eyre!("manifest path {} has no parent directory", config_path.display()))?
+        .join(".secrets");
+    debug!("resolve_secrets_dir: default sibling store {}", dir.display());
+    Ok(dir)
+}
+
+/// Build the interactive stderr banner for a command-level `secrets env` failure.
+///
+/// `declared` is the `secrets.env` allowlist size when the manifest parsed (so the
+/// operator sees how many secrets dropped); `None` when the config itself never
+/// parsed, in which case the count is genuinely unknown and is omitted rather than
+/// fabricated. Pure and unit-testable; the caller gates the actual emission on an
+/// interactive TTY.
+fn secrets_env_banner(declared: Option<usize>) -> String {
+    match declared {
+        Some(n) => format!("manifest: secrets env failed, {} secrets not loaded", n),
+        None => "manifest: secrets env failed, secrets not loaded".to_string(),
+    }
+}
+
+/// Load the manifest and resolve the secrets store dir for `secrets env`.
+///
+/// Command-level failures (an unparseable/`deny_unknown_fields`-violating manifest,
+/// a manifest path with no parent) surface here as `Err` BEFORE any identity is
+/// touched or any byte is emitted - which is exactly what makes the "zero stdout on
+/// command-level error" guarantee structural: the caller never reaches the emit
+/// step when this returns `Err`.
+fn secrets_env_context(config: Option<String>) -> Result<(ManifestSpec, PathBuf)> {
+    debug!("secrets_env_context: config={:?}", config);
+    let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
+    let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
+    debug!(
+        "secrets_env_context: env_count={} secrets_dir={}",
+        spec.secrets.env.len(),
+        secrets_dir.display()
+    );
+    Ok((spec, secrets_dir))
+}
+
+/// `manifest secrets env [-f export|env]`: emit the `secrets.env` allowlist.
+///
+/// Fully buffered: `render_secrets_env` builds the whole output string, and it is
+/// printed in exactly ONE write on success, or NOTHING on a command-level error.
+/// This is the load-bearing fail-soft discipline - a partial `NAME=val` line
+/// already on stdout mutates the shell even if the process later exits non-zero
+/// (proven in Phase 0), so the emit path must never stream.
+///
+/// Two failure classes, kept distinct:
+/// - per-secret decrypt failure -> skipped inside `render_secrets_env` with a
+///   `warn!`; the rest still emit (handled in age.rs, not here).
+/// - command-level failure (bad config, no parent dir, unresolvable identity) ->
+///   zero stdout, non-zero exit (the returned `Err`), plus a one-line stderr
+///   banner gated on an interactive TTY so a lagging machine sees the drop instead
+///   of silently losing every secret.
+fn secrets_env(config: Option<String>, format: &DecryptFormat) -> Result<()> {
+    debug!("secrets_env: format={:?}", format);
+
+    // Track the declared allowlist size so the failure banner can name it. It is
+    // only known once the manifest parses; a parse failure leaves it None.
+    let mut declared: Option<usize> = None;
+    let built = (|| -> Result<String> {
+        let (spec, secrets_dir) = secrets_env_context(config)?;
+        declared = Some(spec.secrets.env.len());
+        let identity = age::resolve_identity(None)?;
+        Ok(age::render_secrets_env(
+            &spec.secrets.env,
+            &secrets_dir,
+            identity.as_ref(),
+            format,
+        ))
+    })();
+
+    match built {
+        Ok(output) => {
+            // Emit the complete buffer in one write. Nothing above reached stdout.
+            print!("{}", output);
+            debug!("secrets_env: emitted buffer len={}", output.len());
+            Ok(())
+        }
+        Err(e) => {
+            // Command-level failure: stdout stays empty (nothing was printed), the
+            // Err drives a non-zero exit, and an interactive-only banner reports it.
+            warn!("secrets_env: command-level failure: {}", e);
+            if std::io::stderr().is_terminal() {
+                eprintln!("{}", secrets_env_banner(declared));
+            }
+            Err(e)
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -507,6 +620,9 @@ fn main() -> Result<()> {
                 action,
             } => {
                 return handle_age_command(identity, recipient, keygen, public_key, action);
+            }
+            Commands::Secrets { action } => {
+                return handle_secrets_command(cli.config.clone(), action);
             }
         }
     }
@@ -912,5 +1028,69 @@ mod tests {
             read_file_from_manifest_dir(&home_path, "latest.sh"),
             crate::manifest::LATEST
         );
+    }
+
+    // ---- Phase 2: secrets env dispatch helpers ----
+
+    fn write_manifest(dir: &Path, content: &str) -> PathBuf {
+        let path = dir.join("manifest.yml");
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_resolve_secrets_dir_defaults_to_sibling_dot_secrets() {
+        // No secrets-store override -> `<dir-of-manifest.yml>/.secrets`.
+        let spec = ManifestSpec::default();
+        let config_path = Path::new("/some/repo/manifest.yml");
+        let dir = resolve_secrets_dir(&spec, config_path).unwrap();
+        assert_eq!(dir, PathBuf::from("/some/repo/.secrets"));
+    }
+
+    #[test]
+    fn test_resolve_secrets_dir_uses_secrets_store_override() {
+        // An explicit secrets-store wins over the default sibling dir.
+        let spec = ManifestSpec {
+            secrets_store: Some(PathBuf::from("/custom/store/.secrets")),
+            ..Default::default()
+        };
+        let config_path = Path::new("/some/repo/manifest.yml");
+        let dir = resolve_secrets_dir(&spec, config_path).unwrap();
+        assert_eq!(dir, PathBuf::from("/custom/store/.secrets"));
+    }
+
+    #[test]
+    fn test_secrets_env_banner_with_and_without_count() {
+        assert_eq!(
+            secrets_env_banner(Some(5)),
+            "manifest: secrets env failed, 5 secrets not loaded"
+        );
+        // Config never parsed -> count unknown -> omit the number rather than lie.
+        assert_eq!(
+            secrets_env_banner(None),
+            "manifest: secrets env failed, secrets not loaded"
+        );
+    }
+
+    #[test]
+    fn test_secrets_env_context_errors_on_unparseable_manifest() {
+        // A `deny_unknown_fields` violation under `secrets:` is a command-level
+        // failure that surfaces at config load - BEFORE any identity is resolved or
+        // any byte emitted. This proves the abort happens ahead of the emit step.
+        let tmp = TempDir::new().unwrap();
+        let bad = write_manifest(tmp.path(), "secrets:\n  bogus: x\n");
+        let result = secrets_env_context(Some(bad.to_string_lossy().into_owned()));
+        assert!(result.is_err(), "unparseable manifest must be a command-level error");
+    }
+
+    #[test]
+    fn test_secrets_env_command_level_failure_returns_err_no_stdout() {
+        // secrets_env prints to stdout ONLY in its Ok arm. A command-level failure
+        // returns Err (driving a non-zero exit) having emitted nothing to stdout;
+        // asserting Err here is asserting the zero-stdout guarantee structurally.
+        let tmp = TempDir::new().unwrap();
+        let bad = write_manifest(tmp.path(), "secrets:\n  bogus: x\n");
+        let result = secrets_env(Some(bad.to_string_lossy().into_owned()), &DecryptFormat::Export);
+        assert!(result.is_err(), "command-level failure must return Err (non-zero exit)");
     }
 }

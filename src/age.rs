@@ -1,10 +1,11 @@
 // src/age.rs
 
+use crate::cli::DecryptFormat;
 use age::armor::{ArmoredReader, ArmoredWriter, Format};
 use age::secrecy::ExposeSecret;
 use age::{Decryptor, Encryptor, Identity, Recipient};
 use eyre::{Result, WrapErr, eyre};
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -1182,6 +1183,79 @@ pub fn render_env(path: &Path, identity: &dyn Identity) -> String {
     output
 }
 
+/// Emit the `secrets.env` allowlist as buffered shell/systemd env lines.
+///
+/// This backs `manifest secrets env`. Unlike `render_exports`/`render_env` (which
+/// walk a whole directory and, on a decrypt failure, emit a poison placeholder),
+/// this iterates ONLY `names` (the `secrets.env` allowlist) and, on a per-secret
+/// failure, SKIPS the entry with a `warn!` to the log file - never a stdout line,
+/// never a placeholder. A `secrets.file` secret has no representation here because
+/// it is simply not in `names`.
+///
+/// Each name resolves to `<secrets_dir>/<name>.age`, decrypts in-process, and is
+/// formatted by `filename_to_var` + the escaper selected by `format`:
+/// `Export -> shell_escape` (ANSI-C `$'...'` for the shell), `Env -> env_escape`
+/// (double-quoted, systemd-`EnvironmentFile`-parseable). `-f env` MUST route
+/// through `env_escape`, never `shell_escape`, whose `$'...'` systemd cannot parse.
+///
+/// Returns the COMPLETE buffer; the caller prints it in one write, or nothing on a
+/// command-level error. This never emits a partial buffer - the fail-soft
+/// `.zshenv` contract depends on that (see design doc "Fail-soft").
+pub fn render_secrets_env(
+    names: &[String],
+    secrets_dir: &Path,
+    identity: &dyn Identity,
+    format: &DecryptFormat,
+) -> String {
+    debug!(
+        "render_secrets_env: names_count={} secrets_dir={} format={:?}",
+        names.len(),
+        secrets_dir.display(),
+        format
+    );
+
+    let mut output = String::new();
+    for name in names {
+        let filename = format!("{}.age", name);
+        let file = secrets_dir.join(&filename);
+        let var_name = filename_to_var(&file);
+        match decrypt_file(&file, identity) {
+            Ok(plaintext) => {
+                match format {
+                    DecryptFormat::Export => {
+                        // Mirror render_exports' quoting: shell_escape returns either a
+                        // plain string (simple values) or $'...' (special chars).
+                        let escaped = shell_escape(&plaintext);
+                        if escaped.starts_with("$'") {
+                            output.push_str(&format!("export {}={}\n", var_name, escaped));
+                        } else {
+                            output.push_str(&format!("export {}='{}'\n", var_name, escaped));
+                        }
+                    }
+                    DecryptFormat::Env => {
+                        let escaped = env_escape(&plaintext);
+                        output.push_str(&format!("{}={}\n", var_name, escaped));
+                    }
+                }
+                trace!("render_secrets_env: emitted var={}", var_name);
+            }
+            Err(e) => {
+                // Per-secret failure: skip, warn to the LOG only (never stdout), no
+                // poison placeholder. The allowlist entry just does not appear.
+                warn!(
+                    "render_secrets_env: skipping secret '{}' ({}): {}",
+                    name,
+                    file.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    debug!("render_secrets_env: buffer_len={}", output.len());
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2190,5 +2264,220 @@ mod tests {
         assert!(written.exists());
         // No file in tmp_dot.
         assert!(!tmp_dot.path().join(var_to_filename(key)).exists());
+    }
+
+    // ---- Phase 2: render_secrets_env (allowlist emit path) ----
+    //
+    // Fixtures are encrypted with a THROWAWAY x25519 identity generated inside the
+    // test (never the real ~/.config/manifest/identity.txt).
+
+    /// Encrypt `value` to `<dir>/<name>.age` for the given throwaway recipient.
+    fn encrypt_secret_into(dir: &Path, name: &str, value: &[u8], recipient: &age::x25519::Recipient) {
+        let ciphertext = encrypt(value, recipient).unwrap();
+        std::fs::write(dir.join(format!("{}.age", name)), ciphertext).unwrap();
+    }
+
+    #[test]
+    fn test_render_secrets_env_allowlist_excludes_unlisted() {
+        // A `secrets.file` secret's ciphertext can sit in the same store dir, but if
+        // it is not in the `names` allowlist it must NEVER appear in the output.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(tmp.path(), "github-pat-work", b"ghp_env_secret", &recipient);
+        // A file-target secret's .age lives in the store but is NOT listed in env.
+        encrypt_secret_into(tmp.path(), "syncthing-key-desk", b"PRIVATE-TLS-KEY", &recipient);
+
+        let names = vec!["github-pat-work".to_string()];
+        let output = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Export);
+
+        assert!(
+            output.contains("GITHUB_PAT_WORK"),
+            "listed env secret must appear: {output}"
+        );
+        assert!(
+            !output.contains("SYNCTHING_KEY_DESK"),
+            "unlisted (file-target) secret must not appear: {output}"
+        );
+        assert!(
+            !output.contains("PRIVATE-TLS-KEY"),
+            "unlisted secret's value must not leak: {output}"
+        );
+    }
+
+    #[test]
+    fn test_render_secrets_env_per_secret_failure_skips_no_placeholder() {
+        // A genuine per-secret decrypt failure (ciphertext encrypted to a DIFFERENT
+        // recipient) must be skipped: nothing emitted for it, and NO poison
+        // placeholder string anywhere in the output.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let other = age::x25519::Identity::generate();
+        let other_recipient = other.to_public();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        encrypt_secret_into(tmp.path(), "good", b"good-value", &recipient);
+        // `bad.age` is encrypted to a recipient our identity cannot decrypt.
+        encrypt_secret_into(tmp.path(), "bad", b"bad-value", &other_recipient);
+
+        let names = vec!["good".to_string(), "bad".to_string()];
+        let output = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Export);
+
+        assert!(
+            output.contains("export GOOD="),
+            "decryptable secret must emit: {output}"
+        );
+        assert!(
+            !output.contains("BAD"),
+            "undecryptable secret must be skipped: {output}"
+        );
+        assert!(
+            !output.contains("manifest age command failed"),
+            "no poison placeholder may appear: {output}"
+        );
+    }
+
+    #[test]
+    fn test_render_secrets_env_missing_file_skips() {
+        // A name with no backing .age file is a per-secret read failure: skipped,
+        // nothing emitted, no placeholder.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+        encrypt_secret_into(tmp.path(), "present", b"here", &recipient);
+
+        let names = vec!["present".to_string(), "absent".to_string()];
+        let output = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Env);
+
+        assert_eq!(output, "PRESENT=here\n");
+    }
+
+    #[test]
+    fn test_render_secrets_env_export_evals_in_shell() {
+        // -f export must eval cleanly in a real shell, reproducing the exact value,
+        // for a value containing a space, a double quote, a `$`, and a literal `'`.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let value: &[u8] = b"a b\"c$d'e";
+        encrypt_secret_into(tmp.path(), "thing", value, &recipient);
+
+        let names = vec!["thing".to_string()];
+        let output = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Export);
+        // shell_escape uses ANSI-C `$'...'` here because of the literal quote.
+        assert!(
+            output.starts_with("export THING=$'"),
+            "expected ANSI-C export form: {output}"
+        );
+
+        // eval the emitted line in bash and print $THING; it must equal `value`.
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg("eval \"$1\"; printf %s \"$THING\"")
+            .arg("bash")
+            .arg(output.trim_end())
+            .output()
+            .expect("bash must be available to eval the export line");
+        assert!(out.status.success(), "bash eval failed: {:?}", out);
+        assert_eq!(out.stdout, value, "eval'd value must round-trip exactly");
+    }
+
+    #[test]
+    fn test_render_secrets_env_env_format_systemd_grammar() {
+        // -f env MUST route through env_escape (systemd EnvironmentFile grammar),
+        // NEVER shell_escape's ANSI-C `$'...'` which systemd cannot parse.
+        //
+        // A real systemd parse (`systemd-run --user --property=EnvironmentFile=...`)
+        // is unavailable in CI/sandbox (no user session bus), so this asserts the
+        // output conforms to systemd's documented EnvironmentFile grammar: a bare
+        // `NAME=value` or a double-quoted value using only `\"`, `\\`, `\n` escapes
+        // with no `$`-expansion. See implementation notes (Deviations).
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let value: &[u8] = b"a b\"c$d'e";
+        encrypt_secret_into(tmp.path(), "thing", value, &recipient);
+
+        let names = vec!["thing".to_string()];
+        let output = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Env);
+
+        // Independently reproduce the systemd-grammar escaping and assert equality.
+        let expected = format!("THING={}\n", env_escape(value));
+        assert_eq!(output, expected);
+
+        // The load-bearing discriminator: env format must NOT emit shell ANSI-C.
+        assert!(!output.contains("$'"), "-f env must not emit ANSI-C `$'...'`: {output}");
+
+        // Grammar check: the value portion is double-quoted (it has whitespace),
+        // and every backslash escapes only one of `"`, `\`, `n` (systemd's set).
+        let val = output.trim_end().strip_prefix("THING=").unwrap();
+        assert!(
+            val.starts_with('"') && val.ends_with('"'),
+            "expected double-quoted value: {val}"
+        );
+        let inner = &val[1..val.len() - 1];
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                let next = chars.next().expect("dangling backslash in env value");
+                assert!(
+                    matches!(next, '"' | '\\' | 'n'),
+                    "illegal systemd escape \\{next} in {val}"
+                );
+            } else {
+                assert_ne!(c, '"', "unescaped double quote in double-quoted env value: {val}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_secrets_env_set_matches_legacy_sweep_env() {
+        // The emitted name/value SET for a `secrets.env` allowlist must equal what
+        // the legacy directory sweep (`render_env`) emits for the SAME set. Compare
+        // as SETS, not byte order: find_age_files does not sort.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(tmp.path(), "alpha-key", b"aaa", &recipient);
+        encrypt_secret_into(tmp.path(), "beta-token", b"bbb bbb", &recipient);
+        encrypt_secret_into(tmp.path(), "gamma", b"ccc", &recipient);
+
+        // Allowlist lists every secret in the dir (order intentionally shuffled).
+        let names = vec!["gamma".to_string(), "alpha-key".to_string(), "beta-token".to_string()];
+        let new_out = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Env);
+        let legacy_out = render_env(tmp.path(), &identity);
+
+        let new_set: std::collections::HashSet<&str> = new_out.lines().collect();
+        let legacy_set: std::collections::HashSet<&str> = legacy_out.lines().collect();
+        assert_eq!(
+            new_set, legacy_set,
+            "env SET must match legacy sweep\nnew={new_out}\nlegacy={legacy_out}"
+        );
+    }
+
+    #[test]
+    fn test_render_secrets_env_set_matches_legacy_sweep_export() {
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        encrypt_secret_into(tmp.path(), "alpha-key", b"aaa", &recipient);
+        encrypt_secret_into(tmp.path(), "beta-token", b"it's here", &recipient);
+        encrypt_secret_into(tmp.path(), "gamma", b"ccc", &recipient);
+
+        let names = vec!["beta-token".to_string(), "gamma".to_string(), "alpha-key".to_string()];
+        let new_out = render_secrets_env(&names, tmp.path(), &identity, &DecryptFormat::Export);
+        let legacy_out = render_exports(tmp.path(), &identity);
+
+        let new_set: std::collections::HashSet<&str> = new_out.lines().collect();
+        let legacy_set: std::collections::HashSet<&str> = legacy_out.lines().collect();
+        assert_eq!(
+            new_set, legacy_set,
+            "export SET must match legacy sweep\nnew={new_out}\nlegacy={legacy_out}"
+        );
     }
 }

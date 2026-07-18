@@ -227,6 +227,27 @@ pub enum Commands {
         #[command(subcommand)]
         action: Option<AgeAction>,
     },
+
+    /// Emit or deploy secrets declared in `manifest.yml`
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretsAction {
+    /// Emit every `secrets.env` entry as shell `export` (default) or systemd
+    /// `EnvironmentFile` (`-f env`) lines. Allowlist over `secrets.env` only; a
+    /// `secrets.file` secret is never emitted. Output is fully buffered and
+    /// printed once (or nothing on a command-level error) so a partial env can
+    /// never leak into the shell.
+    Env {
+        /// Output format: export (default) or env
+        #[arg(short = 'f', long = "format", default_value = "export")]
+        format: DecryptFormat,
+    },
+    // `deploy` (the `secrets.file` lane) is added in Phase 3.
 }
 
 #[derive(Debug, Subcommand)]
