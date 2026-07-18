@@ -15,6 +15,14 @@ use std::thread;
 use std::time::Duration;
 use walkdir::WalkDir;
 
+/// Mode a `secrets.file` destination (and its temp file, from creation) is
+/// written at. Per-entry override is explicitly deferred (see design doc); a
+/// single hardcoded mode keeps `secrets.file` values a homogeneous path
+/// string rather than a `{path, mode}` map. Unused until Phase 3 wires the
+/// `secrets deploy` lane that writes at this mode.
+#[allow(dead_code)]
+const SECRET_FILE_MODE: u32 = 0o600;
+
 // ============ ENCRYPTION ============
 
 /// Encrypt data to armored age format

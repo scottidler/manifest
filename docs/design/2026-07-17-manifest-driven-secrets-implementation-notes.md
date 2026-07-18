@@ -37,3 +37,53 @@ edit history.
 
 ### Open questions
 - None.
+
+## Phase 1: Schema
+
+### Design decisions
+- `SecretsSpec { env: Vec<String>, file: HashMap<String, String> }` added to
+  `src/config.rs`, `#[serde(deny_unknown_fields)]`, plain lowercase field names
+  matching the yaml keys (no rename) -- exactly per the design doc. Wired into
+  `ManifestSpec` as `#[serde(default)] pub secrets: SecretsSpec`, next to
+  `script:` (`src/config.rs:82`), so a manifest with no `secrets:` block still
+  deserializes.
+- Tilde-expansion of `secrets.file` destination values lives in
+  `load_manifest_spec` (`src/config.rs:32`), the exact same post-deserialization
+  hook `secrets_store` already uses -- `PathBuf`/`from_reader` do not expand `~`,
+  so this is a deliberate second pass over `parsed.secrets.file.values_mut()`.
+  Only the destination path is touched; the map key (secret name) is never
+  passed through `expand_tilde`.
+- `const SECRET_FILE_MODE: u32 = 0o600;` added to `src/age.rs` (not a new
+  `secrets` module) per the team lead's routing instruction -- Phase 3's
+  `secrets deploy` lane lives in `age.rs` alongside the other atomic-write/chmod
+  primitives it will reuse (`encrypt_named`'s atomic-write skeleton,
+  `generate_identity`'s chmod idiom). It is unused at Phase 1, so it is gated
+  `#[allow(dead_code)]` with a doc comment stating it is consumed in Phase 3.
+  This is a deliberate, temporary exception to the repo's "never
+  `#[allow(dead_code)]`" rule for an explicitly transitional, phase-gated const;
+  it must be removed (the attribute, not the const) the moment Phase 3 wires a
+  call site.
+- Tests live inline in `#[cfg(test)] mod tests` at the bottom of `config.rs`,
+  matching this repo's existing convention (documented in the repo's
+  `CLAUDE.md`), not the separate-test-file convention used elsewhere.
+
+### Deviations
+- None. Schema, field names, `deny_unknown_fields`, no `FileSecret` struct, and
+  the tilde-expansion hook all match the design doc's Architecture section
+  exactly.
+
+### Tradeoffs
+- Considered adding a new `src/secrets.rs` module for `SECRET_FILE_MODE` instead
+  of `age.rs`. Chose `age.rs` because Phase 3's deploy lane explicitly reuses
+  `age.rs`'s atomic-write skeleton and chmod idiom (design doc Architecture
+  section); putting the mode const anywhere else would just require moving it
+  again in Phase 3 for no benefit now.
+- `expand_tilde` takes a `PathBuf`, so expanding a `String` map value requires a
+  `PathBuf::from` / `to_string_lossy` round trip per entry. Considered changing
+  `secrets.file`'s value type to `PathBuf` instead of `String` to avoid this,
+  but the design doc is explicit that `file` is `HashMap<String, String>` (the
+  same type as `LinkSpec.items`) -- kept `String` and paid the small round-trip
+  cost in the load hook rather than diverge from the documented type.
+
+### Open questions
+- None.

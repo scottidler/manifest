@@ -37,7 +37,16 @@ pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
     if let Some(p) = parsed.secrets_store.take() {
         parsed.secrets_store = Some(expand_tilde(p));
     }
+    // Expand ~ in each secrets.file destination path, same hook as secrets_store.
+    // Only the destination is a path; the map key is a plain secret name, never
+    // touched here.
+    for path in parsed.secrets.file.values_mut() {
+        *path = expand_tilde(PathBuf::from(path.as_str()))
+            .to_string_lossy()
+            .into_owned();
+    }
     debug!("load_manifest_spec: secrets_store={:?}", parsed.secrets_store);
+    debug!("load_manifest_spec: secrets.file entries={}", parsed.secrets.file.len());
     Ok(parsed)
 }
 
@@ -78,6 +87,8 @@ pub struct ManifestSpec {
     pub git_crypt: GitCryptSpec,
     #[serde(default)]
     pub script: ScriptSpec,
+    #[serde(default)]
+    pub secrets: SecretsSpec,
 
     /// Optional path to the secrets store directory. Used as the fallback output
     /// directory for `--name`/`--paste` when `-o DIR` is not given. Not applied to
@@ -174,6 +185,21 @@ pub struct ScriptSpec {
     #[serde(default)]
     #[serde(flatten)]
     pub items: HashMap<String, String>,
+}
+
+/// Declares every age-encrypted secret and its sink: `env` (a plain list of
+/// names, each emitted as a shell/systemd env line) or `file` (a name -> path
+/// map, each decrypted to that path at `SECRET_FILE_MODE`). Both blocks are
+/// homogeneous value types (no scalar/map mix), so there is no `link:`/`dirs`
+/// style parse trap; `deny_unknown_fields` catches a typo'd key under
+/// `secrets:` at parse time instead of silently dropping it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsSpec {
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub file: HashMap<String, String>,
 }
 
 fn default_repopath() -> String {
@@ -444,6 +470,96 @@ mod tests {
         assert!(spec.github.items.is_empty());
         assert!(spec.git_crypt.items.is_empty());
         assert!(spec.script.items.is_empty());
+        assert!(spec.secrets.env.is_empty());
+        assert!(spec.secrets.file.is_empty());
+    }
+
+    // ---- secrets ----
+
+    #[test]
+    fn test_secrets_spec_round_trip() {
+        let yaml = r#"
+secrets:
+  env:
+    - github-pat-work
+    - github-pat-home
+  file:
+    work-signing-key: ~/.ssh/identities/work/signing
+    syncthing-cert-desk: ~/.config/syncthing/cert.pem
+"#;
+        let spec: ManifestSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.secrets.env.len(), 2);
+        assert!(spec.secrets.env.contains(&"github-pat-work".to_string()));
+        assert!(spec.secrets.env.contains(&"github-pat-home".to_string()));
+        assert_eq!(spec.secrets.file.len(), 2);
+        assert_eq!(
+            spec.secrets.file.get("work-signing-key"),
+            Some(&"~/.ssh/identities/work/signing".to_string())
+        );
+        assert_eq!(
+            spec.secrets.file.get("syncthing-cert-desk"),
+            Some(&"~/.config/syncthing/cert.pem".to_string())
+        );
+    }
+
+    #[test]
+    fn test_secrets_file_value_tilde_expanded_by_load_manifest_spec() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("HOME").ok();
+
+        unsafe { std::env::set_var("HOME", "/home/testuser") };
+
+        let yaml = r#"
+secrets:
+  file:
+    work-signing-key: ~/.ssh/identities/work/signing
+"#;
+        let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
+        assert_eq!(
+            spec.secrets.file.get("work-signing-key"),
+            Some(&"/home/testuser/.ssh/identities/work/signing".to_string())
+        );
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn test_secrets_file_map_value_fails_deserialization() {
+        // A secrets.file entry must be a plain path string. A map value (the
+        // {path, mode} shape the design doc explicitly rejects) must fail to
+        // parse, proving homogeneity is held.
+        let yaml = r#"
+secrets:
+  file:
+    work-signing-key:
+      path: ~/.ssh/identities/work/signing
+      mode: "0600"
+"#;
+        let result: std::result::Result<ManifestSpec, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secrets_unknown_key_fails_deserialization() {
+        let yaml = r#"
+secrets:
+  env:
+    - github-pat-work
+  target: something
+"#;
+        let result: std::result::Result<ManifestSpec, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secrets_absent_defaults_to_empty() {
+        let yaml = "verbose: true\n";
+        let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
+        assert!(spec.secrets.env.is_empty());
+        assert!(spec.secrets.file.is_empty());
     }
 
     #[test]
