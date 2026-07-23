@@ -17,7 +17,7 @@ use eyre::WrapErr;
 use log::*;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -362,15 +362,6 @@ fn handle_age_command(
                     return Err(eyre::eyre!("stdin is a TTY; pipe a value into --name, or use --paste"));
                 }
 
-                // Read all of stdin.
-                let mut plaintext = Vec::new();
-                std::io::stdin()
-                    .read_to_end(&mut plaintext)
-                    .wrap_err("failed to read stdin")?;
-
-                // Strip a single trailing newline (matches clipboard semantics).
-                let plaintext = age::strip_trailing_newline(plaintext);
-
                 // Resolve output dir: -o DIR > secrets-store (lazy config load) > error.
                 // Config is loaded lazily here - only when -o was not given - so that
                 // missing/malformed manifest.yml cannot break --keygen, --public-key,
@@ -378,8 +369,18 @@ fn handle_age_command(
                 // main.rs:~439 is not reordered.
                 let out_dir = resolve_new_output_dir(output_dir.as_ref())?;
 
-                let written =
-                    age::encrypt_named(name, &plaintext, recipient_box.as_ref(), identity_path, &out_dir, force)?;
+                // BYTE-EXACT: read stdin and encrypt without stripping a trailing
+                // newline. A file secret (ssh key, PEM cert) ends in `\n` and must
+                // round-trip exactly; the env lane still strips at emit. (Previously
+                // this path stripped here and corrupted newline-terminated files.)
+                let written = age::encrypt_named_from_reader(
+                    name,
+                    &mut std::io::stdin().lock(),
+                    recipient_box.as_ref(),
+                    identity_path,
+                    &out_dir,
+                    force,
+                )?;
                 println!("encrypted: {}", written.display());
                 return Ok(());
             }

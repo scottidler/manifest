@@ -656,10 +656,15 @@ mod clipboard {
 } // mod clipboard
 
 // Re-export the clipboard read surface for callers. `read_clipboard` is called
-// by the `--paste` handler; `strip_trailing_newline` by both `--name`/`--paste`
-// and the unit tests. `clear_clipboard` is called after a successful `--paste`
-// write when `--clear-clipboard` was passed.
-pub(crate) use clipboard::{clear_clipboard, read_clipboard, strip_trailing_newline};
+// by the `--paste` handler. `clear_clipboard` is called after a successful
+// `--paste` write when `--clear-clipboard` was passed. `strip_trailing_newline`
+// is used internally by `read_clipboard` (clipboard values are env-style, so a
+// trailing newline is stripped there); the `--name` encrypt path is byte-exact
+// and does NOT strip (see `encrypt_named_from_reader`). It is re-exported only
+// for its unit tests.
+#[cfg(test)]
+pub(crate) use clipboard::strip_trailing_newline;
+pub(crate) use clipboard::{clear_clipboard, read_clipboard};
 
 // Candidate helpers are exercised only by the unit tests, which keep the
 // session-selection paths referenced and type-checked; they have no production
@@ -801,6 +806,33 @@ pub(crate) fn verify_roundtrip(path: &Path, expected: &[u8], identity: Option<&P
 /// `--force` rotation that fails verification leaves the prior good secret intact.
 ///
 /// Returns the written path on success.
+/// Read a secret's full bytes from `reader` and encrypt them under `name`,
+/// BYTE-EXACT. Unlike the old `--name` handler this does NOT strip a trailing
+/// newline: a file secret (ssh key, PEM cert) legitimately ends in `\n` and must
+/// round-trip exactly, else it is corrupted (an ssh key one byte short is
+/// invalid). Env values are unaffected -- the env emit lane strips a trailing
+/// newline at OUTPUT (`shell_escape`/`env_escape`), not at rest. See the design
+/// doc's "byte-exact file secrets" decision.
+pub(crate) fn encrypt_named_from_reader<R: Read>(
+    name: &str,
+    reader: &mut R,
+    recipient: &dyn Recipient,
+    identity: Option<&Path>,
+    output_dir: &Path,
+    force: bool,
+) -> Result<PathBuf> {
+    let mut plaintext = Vec::new();
+    reader
+        .read_to_end(&mut plaintext)
+        .wrap_err("failed to read secret bytes")?;
+    debug!(
+        "encrypt_named_from_reader: name={} read {} bytes (byte-exact, no newline strip)",
+        name,
+        plaintext.len()
+    );
+    encrypt_named(name, &plaintext, recipient, identity, output_dir, force)
+}
+
 pub(crate) fn encrypt_named(
     name: &str,
     plaintext: &[u8],
@@ -2025,6 +2057,104 @@ mod tests {
         // Decrypt and assert byte-equality.
         let decrypted = decrypt_file(&expected, &identity).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    // ---- byte-exact file secrets (regression: `--name` must NOT strip; ssh-key corruption) ----
+
+    #[test]
+    fn test_encrypt_named_from_reader_preserves_trailing_newline() {
+        // A file secret (ssh key, PEM cert) ends in `\n`. The `--name` encrypt path
+        // must be byte-exact: a stripped trailing newline corrupts the key (an ssh
+        // key one byte short is invalid). This bites the strip the handler used to do.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id_path = write_identity_file(tmp.path(), &identity);
+
+        let payload =
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc123def456\n-----END OPENSSH PRIVATE KEY-----\n".to_vec();
+        let written = encrypt_named_from_reader(
+            "work-signing-key",
+            &mut std::io::Cursor::new(payload.clone()),
+            &recipient,
+            Some(id_path.as_path()),
+            tmp.path(),
+            false,
+        )
+        .unwrap();
+
+        let decrypted = decrypt_file(&written, &identity).unwrap();
+        assert_eq!(
+            decrypted, payload,
+            "all bytes incl. the trailing newline must survive encrypt"
+        );
+        assert_eq!(
+            *decrypted.last().unwrap(),
+            b'\n',
+            "the trailing newline must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_named_from_reader_binary_exact() {
+        // Interior newlines, a CRLF, NUL bytes, and a trailing newline all round-trip
+        // exactly - no strip, no lossy UTF-8 round-trip.
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id_path = write_identity_file(tmp.path(), &identity);
+
+        let payload: Vec<u8> = vec![0x00, 0x01, b'a', b'\n', 0xff, b'b', b'\r', b'\n', 0x00, b'\n'];
+        let written = encrypt_named_from_reader(
+            "binary-secret",
+            &mut std::io::Cursor::new(payload.clone()),
+            &recipient,
+            Some(id_path.as_path()),
+            tmp.path(),
+            false,
+        )
+        .unwrap();
+        let decrypted = decrypt_file(&written, &identity).unwrap();
+        assert_eq!(
+            decrypted, payload,
+            "binary content incl. NUL/CRLF must survive byte-exact"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_named_from_reader_then_deploy_is_byte_identical() {
+        // Full file-lane round-trip: encrypt (byte-exact) -> deploy -> the file on
+        // disk equals the original bytes and is 0600. This is the end-to-end guard
+        // the ssh-key-corruption bug slipped through (deploy tests previously only
+        // used age-crate-encrypted fixtures, bypassing the `--name` strip).
+        use std::os::unix::fs::PermissionsExt;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id_path = write_identity_file(tmp.path(), &identity);
+        let store = tmp.path();
+
+        let payload = b"ssh-ed25519 private key bytes\nwith a trailing newline\n".to_vec();
+        encrypt_named_from_reader(
+            "work-signing-key",
+            &mut std::io::Cursor::new(payload.clone()),
+            &recipient,
+            Some(id_path.as_path()),
+            store,
+            false,
+        )
+        .unwrap();
+
+        let dest = tmp.path().join("deployed").join("signing");
+        deploy_secret_file("work-signing-key", &dest, store, &identity).unwrap();
+
+        let on_disk = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            on_disk, payload,
+            "deployed file must be byte-identical to the original secret"
+        );
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "deployed secret must be 0600");
     }
 
     #[test]

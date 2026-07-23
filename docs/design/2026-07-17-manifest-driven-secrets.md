@@ -473,6 +473,19 @@ the gate is ever mis-sequenced.
   migration + live-unit regeneration (Phase 5) is committable and probeable
   independently of deleting the poison + dir-usage (Phase 6), which is gated on a
   grep proving no consumer remains. (Panel R3.)
+- **2026-07-23: `age encrypt --name` is byte-exact; the trailing-newline strip
+  is emit-only.** A file secret (ssh key, PEM cert) ends in `\n`; stripping it at
+  encrypt corrupted the file (proven with a throwaway ed25519 key: deployed one
+  byte short, `ssh-keygen -y` rejected it). The strip was redundant for env (the
+  emit lane already strips via `shell_escape`/`env_escape`) and destructive for
+  files. Fix: `--name` reads and encrypts raw bytes (`encrypt_named_from_reader`,
+  `age.rs`); env values are unchanged (stripped at output), file secrets now
+  round-trip exactly. `--paste` keeps its clipboard strip (interactive env-secret
+  convenience; a file secret is encrypted via `--name < file`). Existing `.age`
+  files are untouched; anything destined for the file lane must be (re-)encrypted
+  with the fixed byte-exact path. Targeted fix, shipped in the v0.4.0 line.
+  Regression tests: byte-exact round-trip for trailing-newline / multi-line /
+  binary content, plus an encrypt->deploy-to-disk byte-identical + `0600` check.
 - **2026-07-18: Every declared secret name is validated as a bare identifier,
   up-front, fail-closed.** Both new lanes `join` `<store>/<name>.age` from the raw
   manifest name; without validation a `secrets.env` entry or `secrets.file` key
@@ -551,6 +564,11 @@ machines, so sequencing beats permanent transition machinery.
 - Deploy: `0600` via metadata; temp-mode-at-creation asserted; mid-batch failure
   leaves no partial for that entry, deploys the rest; symlinked parent refused;
   plaintext never in stdout/Bash.
+- Byte-exact file secrets: a secret encrypted via the `--name` path
+  (`encrypt_named_from_reader`) round-trips byte-identical through decrypt/deploy
+  for trailing-newline, multi-line, and binary content; an ed25519 key stays
+  valid after the round-trip. Guards against re-introducing an encrypt-time strip
+  that would corrupt ssh keys / PEM certs.
 - Tests must bite: break the code, prove the negative tests fail.
 
 ### Rollout Plan

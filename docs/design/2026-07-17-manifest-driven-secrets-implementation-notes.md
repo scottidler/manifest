@@ -276,3 +276,36 @@ edit history.
 
 ### Open questions
 - None.
+
+## Targeted fix (post-v0.4.1): byte-exact `--name` encrypt
+
+### Design decisions
+- `manifest age encrypt --name` stripped a trailing newline before encrypting
+  (`main.rs`), baking an env-oriented assumption into the ciphertext. Caught by
+  testing the file lane with a THROWAWAY ed25519 key (never the live key): the
+  deployed key was one byte short and `ssh-keygen -y` rejected it.
+- Root cause: the strip belongs at EMIT (the env lane already strips via
+  `shell_escape`/`env_escape`), not at rest. It was redundant for env and
+  destructive for files.
+- Fix: `--name` now routes through `age::encrypt_named_from_reader`, which reads
+  and encrypts raw bytes (no strip). Env unchanged (stripped at output); file
+  secrets round-trip byte-exact. `--paste` keeps its clipboard strip (interactive
+  env convenience; file secrets use `--name < file`).
+
+### Deviations
+- None. This restores the "bare name -> byte-exact ciphertext" contract the file
+  lane needs.
+
+### Tradeoffs
+- Existing 46 `.age` files were encrypted WITH the strip, so they carry no
+  trailing newline. Fine for env (emit strips anyway); any file-lane secret must
+  be (re-)encrypted with the fixed path. Documented in the design doc.
+
+### Open questions
+- None.
+
+### Why the tests missed it (and now don't)
+- The deploy tests asserted content equality but encrypted fixtures directly via
+  the `age` crate, bypassing the `--name` strip - false confidence. Added
+  byte-exact round-trip tests through `encrypt_named_from_reader` (trailing
+  newline, binary, and encrypt->deploy-to-disk 0600), so a re-added strip fails CI.
