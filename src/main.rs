@@ -1333,4 +1333,34 @@ mod tests {
             "linker nested inside a real directory"
         );
     }
+
+    #[test]
+    fn test_linker_refuses_a_pre_existing_loop_in_source() {
+        // A self-referential symlink INSIDE the source (the historical
+        // voice/voice bug, however it got there - old linker bug, manual
+        // ln -s, a different tool) must be caught before deploy, not just
+        // prevented from being re-created by this script's own ln -s call.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("repo/voice");
+        let dst = tmp.path().join("home/voice");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&src, src.join("voice")).unwrap();
+
+        let out = run_linker(&tmp, &src, &dst);
+
+        assert!(
+            !out.status.success(),
+            "a pre-existing loop in the source must be refused"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("loop"),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !link_present(&dst),
+            "must not create the destination link over a looping source"
+        );
+    }
 }

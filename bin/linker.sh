@@ -2,6 +2,17 @@ linker() {
   file=$(realpath "$1")
   link="${2/#\~/$HOME}"
   echo "$link -> $file"
+  # Guard: refuse to link a source that already contains a self-referential
+  # symlink loop, regardless of how it got there (a bug in this script, a
+  # manual ln -s, a different tool). `find -L` has built-in loop detection -
+  # it errors and stops instead of recursing forever. Cheap for a plain file
+  # (nothing to walk); only meaningful for a `dirs:` directory source.
+  loop_err=$(find -L "$file" 2>&1 1>/dev/null)
+  if [ -n "$loop_err" ]; then
+    echo "ERROR: symlink loop found under $file, refusing to link:" >&2
+    echo "$loop_err" >&2
+    return 1
+  fi
   # An existing symlink is the steady state for BOTH file and directory links,
   # so it has to be settled before anything else. `-f` is false for a symlink
   # pointing at a directory, so treating "already linked" as a file test lets a
