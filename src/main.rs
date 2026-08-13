@@ -1236,4 +1236,101 @@ mod tests {
             "a non-bare secrets.file key must be rejected even in dry-run"
         );
     }
+
+    /// Run the embedded linker.sh against (src, dst) in bash, the same way
+    /// `manifest -l '*' | bash` does at deploy time.
+    fn run_linker(tmp: &TempDir, src: &std::path::Path, dst: &std::path::Path) -> std::process::Output {
+        let script = tmp.path().join("linker.sh");
+        fs::write(&script, crate::manifest::LINKER).unwrap();
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source '{}'; linker '{}' '{}'",
+                script.display(),
+                src.display(),
+                dst.display()
+            ))
+            .output()
+            .unwrap()
+    }
+
+    /// A path is present if it exists as a link, even a self-referential one:
+    /// `exists()` follows the link and reports the directory it lands on.
+    fn link_present(path: &std::path::Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+
+    #[test]
+    fn test_linker_leaves_a_correct_dir_symlink_alone() {
+        // Steady state for a `link.dirs` entry: dst is already a symlink to src.
+        // `-f` is false for a directory symlink, so the pre-fix "already linked"
+        // test missed this and re-ran `ln -s`, nesting src/<name> -> src inside
+        // the source tree on every deploy.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("repo/HOME/Claude/writing/voice");
+        let dst = tmp.path().join("home/Claude/writing/voice");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&src, &dst).unwrap();
+
+        let out = run_linker(&tmp, &src, &dst);
+
+        assert!(
+            out.status.success(),
+            "linker failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !link_present(&src.join("voice")),
+            "linker nested a self-referential loop inside the source directory"
+        );
+        assert_eq!(fs::read_link(&dst).unwrap(), src);
+    }
+
+    #[test]
+    fn test_linker_replaces_a_stale_dir_symlink_in_place() {
+        // A directory link pointing at the wrong target is repointed, not nested.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("repo/voice");
+        let stale = tmp.path().join("repo/voice-old");
+        let dst = tmp.path().join("home/voice");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&stale).unwrap();
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&stale, &dst).unwrap();
+
+        let out = run_linker(&tmp, &src, &dst);
+
+        assert!(
+            out.status.success(),
+            "linker failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fs::read_link(&dst).unwrap(), src);
+        assert!(!link_present(&src.join("voice")), "nested into the new target");
+        assert!(!link_present(&stale.join("voice")), "nested into the stale target");
+    }
+
+    #[test]
+    fn test_linker_refuses_a_real_directory_at_dest() {
+        // Pre-existing guard: a REAL directory at dst is a hard error, never a nest.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("repo/voice");
+        let dst = tmp.path().join("home/voice");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        let out = run_linker(&tmp, &src, &dst);
+
+        assert!(!out.status.success(), "a real directory at dst must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("real directory"),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !link_present(&dst.join("voice")),
+            "linker nested inside a real directory"
+        );
+    }
 }
