@@ -1,5 +1,6 @@
 // src/config.rs
 
+use expand_tilde::expand_tilde;
 use eyre::{Result, eyre};
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -8,26 +9,6 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-
-/// Expand a leading `~` in a path to the home directory.
-///
-/// `PathBuf` deserialization does not expand `~`, and `serde_yaml`'s `from_reader`
-/// is a bare parse with no post-processing. This helper is intentionally minimal:
-/// it only expands a leading `~/` or a lone `~`, matching the common config
-/// convention, and falls back to the unexpanded string if `HOME` is unset.
-pub(crate) fn expand_tilde(path: PathBuf) -> PathBuf {
-    debug!("expand_tilde: path={:?}", path);
-    let s = path.to_string_lossy();
-    if s.starts_with("~/") || s == "~" {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let rest = &s[1..];
-        let expanded = PathBuf::from(format!("{}{}", home, rest));
-        debug!("expand_tilde: expanded to {:?}", expanded);
-        expanded
-    } else {
-        path
-    }
-}
 
 pub fn load_manifest_spec<R: Read>(r: R) -> Result<ManifestSpec> {
     debug!("load_manifest_spec: parsing YAML");

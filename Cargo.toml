@@ -22,6 +22,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_yaml = "0.9.34"
 walkdir = "2.5.0"
 colored = "3.0"
+expand-tilde = { git = "ssh://git@github.com/scottidler/expand-tilde", tag = "v0.1.0", version = "0.1.0" }
 
 [build-dependencies]
 regex = "1"
