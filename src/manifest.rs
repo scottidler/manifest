@@ -1,6 +1,7 @@
 // src/manifest.rs
 
 use crate::config::{LinkSpec, RepoSpec};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -15,8 +16,8 @@ pub enum ManifestType {
     UVTool(Vec<String>),
     Flatpak(Vec<String>),
     Cargo(Vec<String>),
-    Github(HashMap<String, RepoSpec>, String),
-    GitCrypt(HashMap<String, RepoSpec>, String),
+    Github(IndexMap<String, RepoSpec>, String),
+    GitCrypt(IndexMap<String, RepoSpec>, String),
     Script(HashMap<String, String>),
 }
 
@@ -185,7 +186,7 @@ fn render_repo_cargo_install(repo_path: &str, paths: &[String]) -> String {
     out
 }
 
-fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
+fn render_github(map: &IndexMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
     out.push_str("\necho \"github repos:\"\n");
 
@@ -214,7 +215,7 @@ fn render_github(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
     out
 }
 
-fn render_gitcrypt(map: &HashMap<String, RepoSpec>, repopath: &str) -> String {
+fn render_gitcrypt(map: &IndexMap<String, RepoSpec>, repopath: &str) -> String {
     let mut out = String::new();
     out.push_str("\necho \"git-crypt repos:\"\n");
 
@@ -477,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_github_render() {
-        let mut items = HashMap::new();
+        let mut items = IndexMap::new();
         let mut repo_spec = crate::config::RepoSpec {
             cargo: vec!["./".to_string()],
             ..Default::default()
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_manifest_type_git_crypt_render() {
-        let mut items = HashMap::new();
+        let mut items = IndexMap::new();
         let mut repo_spec = crate::config::RepoSpec::default();
         repo_spec
             .link
@@ -545,10 +546,10 @@ mod tests {
         let link_type = ManifestType::Link(vec![]);
         assert_eq!(link_type.functions(), LINKER);
 
-        let github_type = ManifestType::Github(HashMap::new(), "repos".to_string());
+        let github_type = ManifestType::Github(IndexMap::new(), "repos".to_string());
         assert_eq!(github_type.functions(), LINKER);
 
-        let gitcrypt_type = ManifestType::GitCrypt(HashMap::new(), "repos".to_string());
+        let gitcrypt_type = ManifestType::GitCrypt(IndexMap::new(), "repos".to_string());
         assert_eq!(gitcrypt_type.functions(), LINKER);
 
         let script_type = ManifestType::Script(HashMap::new());
@@ -651,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_render_github() {
-        let mut items = HashMap::new();
+        let mut items = IndexMap::new();
         let mut repo_spec1 = crate::config::RepoSpec {
             cargo: vec!["./".to_string()],
             ..Default::default()
@@ -744,7 +745,7 @@ mod tests {
     fn test_build_script_deduplicates_functions() {
         let sections = vec![
             ManifestType::Link(vec!["src1 dst1".to_string()]),
-            ManifestType::Github(HashMap::new(), "repos".to_string()),
+            ManifestType::Github(IndexMap::new(), "repos".to_string()),
             ManifestType::Link(vec!["src2 dst2".to_string()]),
         ];
         let result = build_script(&sections);
@@ -778,7 +779,7 @@ mod tests {
             "echo 'Configuration script'\n~/bin/tool --setup".to_string(),
         );
 
-        let mut github_items = HashMap::new();
+        let mut github_items = IndexMap::new();
         github_items.insert("user/repo".to_string(), repo_spec);
 
         let github_type = ManifestType::Github(github_items, "repos".to_string());
@@ -788,5 +789,73 @@ mod tests {
         assert!(rendered.contains("echo \"post_install:\"") || rendered.contains("echo \"configure:\""));
         assert!(rendered.contains("Post install script") || rendered.contains("Configuration script"));
         assert!(rendered.contains("chmod +x ~/bin/tool") || rendered.contains("~/bin/tool --setup"));
+    }
+
+    // Regression: GithubSpec.items was a HashMap, so repos rendered in a random
+    // order per run. A dependent repo (zsh plugins linked under ~/.oh-my-zsh)
+    // could run before the repo it depends on (oh-my-zsh), leaving a real
+    // ~/.oh-my-zsh dir that blocked the oh-my-zsh link on a fresh machine.
+    #[test]
+    fn test_render_github_preserves_manifest_order() {
+        let yaml = r#"
+zsh-users/zsh-autosuggestions: {}
+robbyrussell/oh-my-zsh: {}
+scottidler/slam: {}
+aaa/first-alpha: {}
+zzz/last-alpha: {}
+mattmc3/antidote: {}
+Aloxaf/fzf-tab: {}
+scottidler/cidr: {}
+powerline/powerline: {}
+esc/git-big-picture: {}
+scottidler/kat: {}
+tfutils/tfenv: {}
+"#;
+        let expected = [
+            "zsh-users/zsh-autosuggestions",
+            "robbyrussell/oh-my-zsh",
+            "scottidler/slam",
+            "aaa/first-alpha",
+            "zzz/last-alpha",
+            "mattmc3/antidote",
+            "Aloxaf/fzf-tab",
+            "scottidler/cidr",
+            "powerline/powerline",
+            "esc/git-big-picture",
+            "scottidler/kat",
+            "tfutils/tfenv",
+        ];
+        let spec: crate::config::GithubSpec = serde_yaml::from_str(yaml).unwrap();
+
+        let clone_order = |rendered: &str| -> Vec<String> {
+            rendered
+                .lines()
+                .filter_map(|l| l.strip_prefix("git clone --recursive https://github.com/"))
+                .map(|rest| rest.split_whitespace().next().unwrap().to_string())
+                .collect()
+        };
+
+        use crate::fuzzy::Fuzz;
+        let all = crate::fuzzy::fuzzy(spec.items.clone()).include(&["*".to_string()]);
+        assert_eq!(clone_order(&render_github(&all, "repos")), expected);
+
+        // A filtered run (`-g a b c`) keeps manifest order, not pattern order.
+        let patterns: Vec<String> = [
+            "tfutils/tfenv",
+            "robbyrussell/oh-my-zsh",
+            "zsh-users/zsh-autosuggestions",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let some = crate::fuzzy::fuzzy(spec.items.clone()).include(&patterns);
+        assert_eq!(
+            clone_order(&render_github(&some, "repos")),
+            [
+                "zsh-users/zsh-autosuggestions",
+                "robbyrussell/oh-my-zsh",
+                "tfutils/tfenv"
+            ]
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 use expand_tilde::expand_tilde;
 use eyre::{Result, eyre};
+use indexmap::IndexMap;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_yaml::from_reader;
@@ -203,7 +204,7 @@ pub struct GithubSpec {
     pub repopath: String,
     #[serde(default)]
     #[serde(flatten)]
-    pub items: HashMap<String, RepoSpec>,
+    pub items: IndexMap<String, RepoSpec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -212,7 +213,7 @@ pub struct GitCryptSpec {
     pub repopath: String,
     #[serde(default)]
     #[serde(flatten)]
-    pub items: HashMap<String, RepoSpec>,
+    pub items: IndexMap<String, RepoSpec>,
 }
 
 impl ManifestSpec {

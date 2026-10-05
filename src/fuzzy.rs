@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use glob::Pattern;
+use indexmap::IndexMap;
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -160,6 +161,51 @@ impl<T: Clone + PartialEq> Fuzz for HashMap<String, T> {
     }
 
     fn defuzz(self) -> HashMap<String, T> {
+        self
+    }
+}
+
+// Order-preserving counterpart of the HashMap impl: filtering keeps the
+// manifest's declaration order, so dependent entries render after what they
+// depend on.
+impl<T: Clone + PartialEq> Fuzz for IndexMap<String, T> {
+    type Output = IndexMap<String, T>;
+
+    fn include(self, patterns: &[String]) -> IndexMap<String, T> {
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
+            return self;
+        }
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            let result: IndexMap<String, T> = self
+                .iter()
+                .filter(|(key, _)| patterns.iter().any(|pattern| match_str(key, pattern, mt)))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
+        IndexMap::new()
+    }
+
+    fn exclude(self, patterns: &[String]) -> IndexMap<String, T> {
+        if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
+            return IndexMap::new();
+        }
+        for &mt in DEFAULT_MATCH_TYPES.iter() {
+            let result: IndexMap<String, T> = self
+                .iter()
+                .filter(|(key, _)| patterns.iter().all(|pattern| !match_str(key, pattern, mt)))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
+        IndexMap::new()
+    }
+
+    fn defuzz(self) -> IndexMap<String, T> {
         self
     }
 }

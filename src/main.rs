@@ -14,6 +14,7 @@ use chrono::Local;
 use clap::Parser;
 use eyre::Result;
 use eyre::WrapErr;
+use indexmap::IndexMap;
 use log::*;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -808,7 +809,7 @@ fn main() -> Result<()> {
     }
 
     if complete || !cli.github.is_empty() {
-        let github_items: HashMap<String, RepoSpec> = fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
+        let github_items: IndexMap<String, RepoSpec> = fuzzy(manifest_spec.github.items.clone()).include(&cli.github);
         if !github_items.is_empty() {
             debug!("Adding Github section with {} repos", github_items.len());
             sections.push(ManifestType::Github(
@@ -819,7 +820,7 @@ fn main() -> Result<()> {
     }
 
     if complete || !cli.git_crypt.is_empty() {
-        let gitcrypt_items: HashMap<String, RepoSpec> =
+        let gitcrypt_items: IndexMap<String, RepoSpec> =
             fuzzy(manifest_spec.git_crypt.items.clone()).include(&cli.git_crypt);
         if !gitcrypt_items.is_empty() {
             debug!("Adding GitCrypt section with {} repos", gitcrypt_items.len());
