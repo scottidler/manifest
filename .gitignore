@@ -23,3 +23,5 @@ target/
 # local agent config, never committed
 .claude/
 .mcp.json
+/rc
+mutants.out*
