@@ -35,3 +35,46 @@ Design doc: `docs/design/2026-10-23-secrets-folder-split.md`
 
 ### Open questions
 - Two pre-existing tests (`test_linker_leaves_a_correct_dir_symlink_alone`, `test_linker_replaces_a_stale_dir_symlink_in_place`) fail under the Claude Code Bash sandbox. There `TMPDIR=/tmp/claude-1000` is a symlink to `~/.cache/claude-tmp`, and the tests compare a literal path against `read_link`. They fail identically at baseline `e0d20b8` (checked in a detached worktree). `otto ci` is green with `TMPDIR` set to the resolved path. Should those tests canonicalize their tempdir? This is out of Phase 1's scope.
+
+## Phase 2: keep: move the files, drop the list
+Commit `16bce34` on branch `secrets-folder-split`, worktree `/home/saidler/repos/scottidler/.wt-keep-secrets-folder-split` (keep, based on main `ebe3b98`).
+### Design decisions
+- Phases 2 and 3 run on `secrets-folder-split` branches in worktrees, not on the live checkouts (orchestrator's decision) -- keep stays on the old layout until the binary-first rollout, because desk reads the live checkout and an old binary against moved files silently empties every shell's env.
+- 4 `syncthing-*.age` -> `.file/`, other 67 -> `.env/` via `git mv`; all 71 are `R100`. The 3 aliases moved with their targets, none dangle (`find -xtype l` = 0).
+- `manifest.yml`: whole `secrets:` block removed (it held only `env:`), so no `secrets:` key remains; replaced by a comment block describing the two lanes and why no `secrets.file` is declared. Line 1 header now says `.env/*.age` and `manifest secrets env`.
+- `CLAUDE.md`: Quick Reference (emit via `secrets env`, encrypt into `.env/`, list `.env/`), Architecture tree (`.env/` + `.file/`), How It Works (folder is the allowlist; loader line now `secrets env`), Conventions (both lanes, aliases only inside `.env/`).
+### Deviations
+- Criterion "readlink for each of the 3 aliases shows a bare filename (no `/`)" is not met literally: `claude-cost-anthropic-api-admin-key.age` is `./anthropic-api-admin-key.age`. The other two (`gh-token`, `github-token`) are bare. The link is relative, same-dir, resolves, and is R100, so I left it. Rewriting would break the renames-only criterion.
+- The criterion `git show ... -- .secrets .env .file` passes (0 non-R100 of 71). The commit also modifies `CLAUDE.md` and `manifest.yml` (outside those paths, as the phase requires).
+### Tradeoffs
+- Deleted the `secrets:` key entirely vs. leaving `secrets: {}` -- an empty map is dead config; the comment carries the explanation.
+### Open questions
+- The dotfiles loader `~/.shell-exports.d/secrets.env` (`dotfiles/HOME/.shell-exports.d/secrets.env`) runs `manifest age decrypt .../keep/.secrets` per keep's old CLAUDE.md, but is not in Phase 3's file list. I could not read it (a hook blocks that filename). After the split `.secrets` does not exist, so it must move to `manifest -C ~/repos/scottidler/keep/manifest.yml secrets env` or shells load nothing. Confirm whether it is in scope for Phase 3 or the rollout.
+- Alias `claude-cost-anthropic-api-admin-key.age -> ./anthropic-api-admin-key.age`: fix to a bare name in a separate commit, or relax the criterion?
+
+## Phase 2 orchestrator addendum: criterion amendment and loader check
+
+### Design decisions
+- `dotfiles/HOME/.shell-exports.d/secrets.env` needs no change: it is a 2-line, comment-only stub (`rg -vc '^\s*(#|$)'` = 0 non-comment lines, 0 `manifest`/`decrypt` matches). The live loader is `.zshenv:13`, already `manifest -C .../keep/manifest.yml secrets env`.
+
+### Deviations
+- Amended the Phase 2 alias criterion (doc defect, not a code failure). It said each alias's `readlink` is a bare filename with no `/`. On main, `readlink keep/.secrets/claude-cost-anthropic-api-admin-key.age` = `./anthropic-api-admin-key.age` (since `c37aeed`, 2026-03-28). Making it bare means rewriting the link, which contradicts the same phase's renames-only criterion (all R100). The criterion's intent is a same-dir relative target, and `find .env -xtype l | wc -l` = 0 confirms every alias resolves. New wording: bare filename or `./<name>`, no `..`, not absolute.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- None.
+
+## Phase 3: callers that hardcode a ciphertext path
+### Design decisions
+- spotify-playlist SKILL.md and spotify.py point at `keep/.env`: the refresh token is an env secret hydrated as `$SPOTIFY_REFRESH_TOKEN` (claude/HOME/.claude/skills/spotify-playlist).
+- rules/secrets.md intro names both lanes (`.env/` env, `.file/` deployed to disk). The "all" line is `manifest -C ~/repos/scottidler/keep/manifest.yml secrets env`, with a note that `age decrypt <dir>` on keep is refused (claude/HOME/repos/.claude/rules/secrets.md).
+- entropy-check allow-set is `d in (".env", ".file")`, comment updated (dotfiles/HOME/bin/entropy-check).
+### Deviations
+- secrets.md: the doc lists lines 9,21,22,30,48. Line 9's sentence grew a `.file/` clause (one extra wrapped line), and lines 21-22 collapsed into the one "all" bullet plus a refusal note. Same effect.
+- Success-criterion greps run with bracketed regex `keep/[.]secrets` and `[.]secrets` (a hook mangles `-F` path tokens). Both = 0 (baseline 12).
+### Tradeoffs
+- Left the `$SP/.secrets` scratch-dir mentions in intent-guard-test.sh:228 and intent-guard.sh:1862 alone: unrelated to keep.
+### Open questions
+- None. Both commits are local on `secrets-folder-split` in the claude and dotfiles worktrees, not pushed.
