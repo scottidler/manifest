@@ -43,8 +43,15 @@ The output is meant to be piped to bash: `manifest | bash` or `manifest --link '
 - `age --keygen`: generate new age identity
 - `age --public-key`: show public key from identity file
 
-`--name` and `--paste` write to the first of: `-o DIR`, `secrets-store` from `manifest.yml`, or error.
-Configure the secrets store in `manifest.yml` with `secrets-store: ~/repos/scottidler/secrets/.secrets`.
+- `age decrypt <dir>` refuses a directory holding a `.file/` beside a `.env/` (a split store). One explicit file path still decrypts
+- `secrets env [-f export|env]`: emit every `<root>/.env/*.age` (the directory is the list, no `secrets.env` in the manifest)
+- `secrets deploy [--dry-run]`: decrypt each `secrets.file` name from `<root>/.file/<name>.age` to its path at 0600
+
+`--name` and `--paste` write to the first of: `-o DIR`, `<secrets-store>/.env` from `manifest.yml`, or error.
+`secrets-store` names the secrets root, the directory holding the `.env/` and `.file/` lanes,
+e.g. `secrets-store: ~/repos/scottidler/keep`. Unset, the root is the directory holding `manifest.yml`.
+A leftover `secrets.env:` key is a loud migration error. A `.age` at the root or under a leftover
+`.secrets/` is a warned stray, never decrypted.
 
 ## Config Discovery
 

@@ -228,7 +228,7 @@ pub enum Commands {
         action: Option<AgeAction>,
     },
 
-    /// Emit or deploy secrets declared in `manifest.yml`
+    /// Emit the `.env/` lane, or deploy `secrets.file` entries from the `.file/` lane
     Secrets {
         #[command(subcommand)]
         action: SecretsAction,
@@ -237,9 +237,9 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum SecretsAction {
-    /// Emit every `secrets.env` entry as shell `export` (default) or systemd
-    /// `EnvironmentFile` (`-f env`) lines. Allowlist over `secrets.env` only; a
-    /// `secrets.file` secret is never emitted. Output is fully buffered and
+    /// Emit every `<root>/.env/*.age` as shell `export` (default) or systemd
+    /// `EnvironmentFile` (`-f env`) lines. A `<root>/.file/` secret is never
+    /// emitted, and a symlink escaping `.env/` is skipped. Output is fully buffered and
     /// printed once (or nothing on a command-level error) so a partial env can
     /// never leak into the shell.
     Env {
@@ -248,7 +248,7 @@ pub enum SecretsAction {
         format: DecryptFormat,
     },
 
-    /// Decrypt each `secrets.file` entry and atomically write it to its
+    /// Decrypt each `secrets.file` entry from `<root>/.file/<name>.age` and atomically write it to its
     /// destination path at mode 0600. Native Rust: the decrypted bytes never
     /// pass through generated Bash, stdout, or a process argument. Per-file
     /// atomic; a failed entry is reported and the rest still deploy; the command

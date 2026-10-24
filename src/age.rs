@@ -1235,14 +1235,14 @@ pub fn render_env(path: &Path, identity: &dyn Identity) -> String {
     output
 }
 
-/// Emit the `secrets.env` allowlist as buffered shell/systemd env lines.
+/// Emit the given env secret names as buffered shell/systemd env lines.
 ///
 /// This backs `manifest secrets env`. Unlike `render_exports`/`render_env` (which
 /// walk a whole directory and, on a decrypt failure, emit a poison placeholder),
-/// this iterates ONLY `names` (the `secrets.env` allowlist) and, on a per-secret
-/// failure, SKIPS the entry with a `warn!` to the log file - never a stdout line,
-/// never a placeholder. A `secrets.file` secret has no representation here because
-/// it is simply not in `names`.
+/// this iterates ONLY `names` (the env lane, enumerated by `enumerate_env_lane`)
+/// and, on a per-secret failure, SKIPS the entry with a `warn!` to the log file -
+/// never a stdout line, never a placeholder. A `.file/` secret has no
+/// representation here because it is simply not in `names`.
 ///
 /// Each name resolves to `<secrets_dir>/<name>.age`, decrypts in-process, and is
 /// formatted by `filename_to_var` + the escaper selected by `format`:
@@ -1306,6 +1306,251 @@ pub fn render_secrets_env(
 
     debug!("render_secrets_env: buffer_len={}", output.len());
     output
+}
+
+// ============ SECRETS LANES (directory-driven sinks) ============
+
+/// Lane dir whose every `.age` is emitted into the environment by `secrets env`.
+pub const ENV_LANE: &str = ".env";
+/// Lane dir whose `.age` files only `secrets deploy` reads, never an environment.
+pub const FILE_LANE: &str = ".file";
+/// The retired single store. A `.age` left anywhere under it is a stray.
+pub const LEGACY_STORE: &str = ".secrets";
+
+/// The env lane's enumerated secret names (sorted) plus skip warnings, returned
+/// as data so the caller owns the log and stderr.
+#[derive(Debug, Default, PartialEq)]
+pub struct EnvLane {
+    pub names: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Whether `stem` is an auto-picked env secret name: `^[a-z][a-z0-9-]*$`.
+/// Stricter than `validate_name`, because nothing reviews a name that is
+/// picked up just by dropping a file into `.env/`.
+pub fn is_env_secret_stem(stem: &str) -> bool {
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Check a lane root without following it. `Ok(true)` = a plain directory,
+/// `Ok(false)` = absent. A symlinked lane root is an error: containment would
+/// otherwise trust wherever it resolves (e.g. another root's `.file/`). A lane
+/// path that exists but is not a directory is an error too.
+pub fn check_lane_root(lane: &Path) -> Result<bool> {
+    debug!("check_lane_root: lane={}", lane.display());
+    match fs::symlink_metadata(lane) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(eyre!(
+            "refusing secrets lane '{}': it is a symlink; lane roots must be plain directories",
+            lane.display()
+        )),
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(eyre!("secrets lane '{}' exists but is not a directory", lane.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(eyre!("failed to stat secrets lane '{}': {}", lane.display(), e)),
+    }
+}
+
+/// Stems of every entry ending in `.age` directly in `lane` (any file type,
+/// symlinks included, not followed). An absent lane yields an empty list.
+fn lane_age_stems(lane: &Path) -> Result<Vec<String>> {
+    if !check_lane_root(lane)? {
+        return Ok(vec![]);
+    }
+    let mut stems = Vec::new();
+    for entry in fs::read_dir(lane).wrap_err_with(|| format!("failed to list secrets lane '{}'", lane.display()))? {
+        let entry = entry.wrap_err_with(|| format!("failed to read an entry of '{}'", lane.display()))?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = file_name.strip_suffix(".age") {
+            stems.push(stem.to_string());
+        }
+    }
+    stems.sort();
+    Ok(stems)
+}
+
+/// Check both lane roots and reject a name present in BOTH `<root>/.env/` and
+/// `<root>/.file/`. Each is a command-level error in either lane: a symlinked
+/// lane root defeats containment, and a name in both lanes would mean two
+/// things (guessing a lane is how a file secret leaks). Absent lanes pass.
+pub fn check_lanes(root: &Path) -> Result<()> {
+    let env = lane_age_stems(&root.join(ENV_LANE))?;
+    let file = lane_age_stems(&root.join(FILE_LANE))?;
+    let both: Vec<&str> = env.iter().filter(|s| file.contains(s)).map(String::as_str).collect();
+    debug!("check_lanes: root={} collisions={}", root.display(), both.len());
+    if both.is_empty() {
+        return Ok(());
+    }
+    Err(eyre!(
+        "secret name(s) in both {} and {} under '{}': {}; each secret belongs to exactly one lane",
+        ENV_LANE,
+        FILE_LANE,
+        root.display(),
+        both.join(", ")
+    ))
+}
+
+/// Stray ciphertext that neither lane ever decrypts: a `.age` directly in
+/// `<root>/`, or anywhere under a leftover `<root>/.secrets/`. Returned as
+/// warnings, never an error: one misplaced file must not drop every secret.
+pub fn find_strays(root: &Path) -> Vec<String> {
+    let mut strays = Vec::new();
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if !is_dir && path.extension().is_some_and(|ext| ext == "age") {
+                strays.push(path);
+            }
+        }
+    }
+    let legacy = root.join(LEGACY_STORE);
+    if legacy.is_dir() {
+        for entry in WalkDir::new(&legacy).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_dir() && entry.path().extension().is_some_and(|ext| ext == "age") {
+                strays.push(entry.path().to_path_buf());
+            }
+        }
+    }
+    strays.sort();
+    debug!("find_strays: root={} strays={}", root.display(), strays.len());
+    strays
+        .iter()
+        .map(|p| {
+            format!(
+                "stray secret '{}' is in no lane and is not loaded; move it into {}/ or {}/",
+                p.display(),
+                ENV_LANE,
+                FILE_LANE
+            )
+        })
+        .collect()
+}
+
+/// Enumerate the env lane, `<root>/.env/`, non-recursively.
+///
+/// Command-level errors (`Err`): `.env/` missing, either lane root a symlink,
+/// a name in both lanes, two stems mapping to one `$NAME`. Skipped with a
+/// warning: a subdirectory, a stem outside `^[a-z][a-z0-9-]*$`, a symlink whose
+/// canonical target is outside canonical `.env/` (or dangling, or not a file).
+/// Non-`.age` entries are ignored. Strays are appended as warnings. Names come
+/// back sorted, so output is deterministic.
+pub fn enumerate_env_lane(root: &Path) -> Result<EnvLane> {
+    debug!("enumerate_env_lane: root={}", root.display());
+    let env_dir = root.join(ENV_LANE);
+    if !check_lane_root(&env_dir)? {
+        return Err(eyre!(
+            "no env lane: '{}' does not exist; env secrets live in <root>/{}/",
+            env_dir.display(),
+            ENV_LANE
+        ));
+    }
+    check_lanes(root)?;
+
+    let canonical_env = fs::canonicalize(&env_dir)
+        .wrap_err_with(|| format!("failed to canonicalize env lane '{}'", env_dir.display()))?;
+
+    let mut lane = EnvLane::default();
+    let mut by_var: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for entry in fs::read_dir(&env_dir).wrap_err_with(|| format!("failed to list env lane '{}'", env_dir.display()))? {
+        let entry = entry.wrap_err_with(|| format!("failed to read an entry of '{}'", env_dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .wrap_err_with(|| format!("failed to stat '{}'", path.display()))?;
+        if file_type.is_dir() {
+            lane.warnings.push(format!(
+                "skipping subdirectory '{}': the env lane is not recursive",
+                path.display()
+            ));
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = file_name.strip_suffix(".age") else {
+            trace!("enumerate_env_lane: ignoring non-.age entry {}", path.display());
+            continue;
+        };
+        if !is_env_secret_stem(stem) {
+            lane.warnings.push(format!(
+                "skipping '{}': env secret names must match ^[a-z][a-z0-9-]*$",
+                path.display()
+            ));
+            continue;
+        }
+        if file_type.is_symlink() {
+            // Fail-closed chokepoint: a link is followed only if its canonical
+            // target stays inside canonical `.env/`. Without this,
+            // `.env/x.age -> ../.file/k.age` would leak a file secret.
+            match fs::canonicalize(&path) {
+                Ok(target) if target.starts_with(&canonical_env) && target != canonical_env && target.is_file() => {
+                    trace!(
+                        "enumerate_env_lane: alias {} -> {} contained",
+                        path.display(),
+                        target.display()
+                    );
+                }
+                Ok(target) => {
+                    lane.warnings.push(format!(
+                        "skipping symlink '{}': its target '{}' is outside the env lane",
+                        path.display(),
+                        target.display()
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    lane.warnings.push(format!(
+                        "skipping symlink '{}': it does not resolve ({})",
+                        path.display(),
+                        e
+                    ));
+                    continue;
+                }
+            }
+        }
+        let var = filename_to_var(&path);
+        if let Some(prior) = by_var.insert(var.clone(), stem.to_string()) {
+            return Err(eyre!("env secrets '{}' and '{}' both map to ${}", prior, stem, var));
+        }
+        lane.names.push(stem.to_string());
+    }
+    lane.names.sort();
+    lane.warnings.extend(find_strays(root));
+    debug!(
+        "enumerate_env_lane: names={} warnings={}",
+        lane.names.len(),
+        lane.warnings.len()
+    );
+    Ok(lane)
+}
+
+/// Refuse an `age decrypt <dir>` sweep over a split store: if the walk finds a
+/// directory named `.file` with a sibling `.env`, the sweep would print file
+/// secrets as env lines. A single explicit file path is never refused: naming
+/// the file is the intent.
+pub fn refuse_split_store_sweep(path: &Path) -> Result<()> {
+    debug!("refuse_split_store_sweep: path={}", path.display());
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_dir() && entry.file_name() == FILE_LANE {
+            let sibling_env = entry.path().with_file_name(ENV_LANE);
+            if fs::symlink_metadata(&sibling_env).is_ok() {
+                return Err(eyre!(
+                    "refusing to sweep '{}': it holds a split secrets store ('{}' beside '{}'); \
+                     use `manifest secrets env` for env secrets, or decrypt one file by path",
+                    path.display(),
+                    entry.path().display(),
+                    sibling_env.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ============ SECRETS DEPLOY (file lane) ============
@@ -2814,7 +3059,7 @@ mod tests {
 
     #[test]
     fn test_render_secrets_env_set_matches_legacy_sweep_env() {
-        // The emitted name/value SET for a `secrets.env` allowlist must equal what
+        // The emitted name/value SET for an env name list must equal what
         // the legacy directory sweep (`render_env`) emits for the SAME set. Compare
         // as SETS, not byte order: find_age_files does not sort.
         let identity = age::x25519::Identity::generate();
@@ -3062,5 +3307,104 @@ mod tests {
             !rendered.contains(secret),
             "plaintext must not appear in the deploy report: {rendered}"
         );
+    }
+
+    // ---- secrets lanes ----
+
+    #[test]
+    fn test_is_env_secret_stem() {
+        for ok in ["a", "github-pat-home", "k8s-token", "x1"] {
+            assert!(is_env_secret_stem(ok), "{ok} must be accepted");
+        }
+        for bad in [
+            "",
+            "Bad_Name",
+            "1abc",
+            "-lead",
+            "has.dot",
+            "under_score",
+            "UPPER",
+            ".hidden",
+        ] {
+            assert!(!is_env_secret_stem(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn test_check_lane_root_states() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let lane = tmp.path().join(".env");
+        assert!(!check_lane_root(&lane).unwrap(), "absent lane -> Ok(false)");
+        std::fs::create_dir(&lane).unwrap();
+        assert!(check_lane_root(&lane).unwrap(), "plain dir -> Ok(true)");
+
+        let linked = tmp.path().join(".file");
+        std::os::unix::fs::symlink(&lane, &linked).unwrap();
+        let err = check_lane_root(&linked).expect_err("symlinked lane root -> Err");
+        assert!(err.to_string().contains("symlink"), "names the symlink refusal: {err}");
+
+        let not_dir = tmp.path().join("plain-file");
+        std::fs::write(&not_dir, "x").unwrap();
+        assert!(check_lane_root(&not_dir).is_err(), "non-directory lane -> Err");
+    }
+
+    #[test]
+    fn test_check_lanes_collision_and_clean() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(ENV_LANE)).unwrap();
+        std::fs::create_dir(tmp.path().join(FILE_LANE)).unwrap();
+        std::fs::write(tmp.path().join(ENV_LANE).join("a.age"), "x").unwrap();
+        std::fs::write(tmp.path().join(FILE_LANE).join("b.age"), "x").unwrap();
+        assert!(check_lanes(tmp.path()).is_ok(), "disjoint lanes pass");
+        std::fs::write(tmp.path().join(FILE_LANE).join("a.age"), "x").unwrap();
+        assert!(check_lanes(tmp.path()).is_err(), "a name in both lanes fails");
+    }
+
+    #[test]
+    fn test_find_strays_root_and_legacy_store_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(ENV_LANE)).unwrap();
+        std::fs::write(tmp.path().join(ENV_LANE).join("in-lane.age"), "x").unwrap();
+        assert!(find_strays(tmp.path()).is_empty(), "lane files are not strays");
+        std::fs::write(tmp.path().join("top.age"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join(LEGACY_STORE)).unwrap();
+        std::fs::write(tmp.path().join(LEGACY_STORE).join("old.age"), "x").unwrap();
+        let strays = find_strays(tmp.path());
+        assert_eq!(strays.len(), 2, "{strays:?}");
+        assert!(strays.iter().any(|w| w.contains("top.age")));
+        assert!(strays.iter().any(|w| w.contains("old.age")));
+    }
+
+    #[test]
+    fn test_enumerate_env_lane_sorted_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = tmp.path().join(ENV_LANE);
+        std::fs::create_dir(&env).unwrap();
+        for name in ["zeta", "alpha", "mid"] {
+            std::fs::write(env.join(format!("{name}.age")), "x").unwrap();
+        }
+        let lane = enumerate_env_lane(tmp.path()).unwrap();
+        assert_eq!(lane.names, vec!["alpha", "mid", "zeta"]);
+        assert!(lane.warnings.is_empty());
+        assert!(enumerate_env_lane(&tmp.path().join("nowhere")).is_err());
+    }
+
+    #[test]
+    fn test_refuse_split_store_sweep_dir_vs_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let nested = tmp.path().join("keep");
+        std::fs::create_dir_all(nested.join(FILE_LANE)).unwrap();
+        let k = nested.join(FILE_LANE).join("k.age");
+        std::fs::write(&k, "x").unwrap();
+        assert!(
+            refuse_split_store_sweep(tmp.path()).is_ok(),
+            ".file/ without .env/ is not split"
+        );
+        std::fs::create_dir(nested.join(ENV_LANE)).unwrap();
+        assert!(
+            refuse_split_store_sweep(tmp.path()).is_err(),
+            "a nested split store is found by the walk"
+        );
+        assert!(refuse_split_store_sweep(&k).is_ok(), "a single file is never refused");
     }
 }

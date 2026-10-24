@@ -520,6 +520,10 @@ the gate is ever mis-sequenced.
 - **Split stores** (env `.age` and file `.age` in separate folders) -- fixes the
   leak with no fork, but changes the storage layout (breaks "stays in
   `.secrets/`").
+  - **Superseded 2026-10-23:** adopted. The `secrets.env` allowlist drifted (5
+    secrets added but never declared), so the "stays in `.secrets/`" constraint
+    was dropped along with `.secrets/` itself. Layout is now `<root>/.env/` +
+    `<root>/.file/`. See `2026-10-23-secrets-folder-split.md`.
 - **Pinned old binary** -- an extra artifact to babysit.
 All rejected: the migration is one-time across three operator-controlled
 machines, so sequencing beats permanent transition machinery.

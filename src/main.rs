@@ -216,7 +216,8 @@ fn setup_logging() -> Result<()> {
 ///
 /// Resolution order (highest priority first):
 /// 1. `-o DIR` if given explicitly.
-/// 2. `secrets-store` from the loaded `ManifestSpec` (tilde-expanded).
+/// 2. `<secrets-store>/.env` from the loaded `ManifestSpec` (tilde-expanded):
+///    env is the common case; a file secret passes `-o <root>/.file`.
 /// 3. Neither set -> `eyre!` with a fix-it message.
 ///
 /// Config is loaded **lazily** here - only when `-o` was not provided - so a
@@ -240,9 +241,9 @@ fn resolve_new_output_dir(output_dir: Option<&PathBuf>) -> Result<PathBuf> {
     match ManifestSpec::load_from_standard_locations(None) {
         Ok((spec, config_path)) => {
             debug!("resolve_new_output_dir: loaded config from {:?}", config_path);
-            if let Some(store) = spec.secrets_store {
-                debug!("resolve_new_output_dir: using secrets-store={}", store.display());
-                return Ok(store);
+            if let Some(dir) = default_output_dir(&spec) {
+                debug!("resolve_new_output_dir: using secrets-store env lane={}", dir.display());
+                return Ok(dir);
             }
         }
         Err(e) => {
@@ -256,6 +257,27 @@ fn resolve_new_output_dir(output_dir: Option<&PathBuf>) -> Result<PathBuf> {
     Err(eyre::eyre!(
         "no output directory: pass -o DIR or set secrets-store in manifest.yml"
     ))
+}
+
+/// The `--name`/`--paste` fallback output dir when `-o` is absent: the env lane
+/// of `secrets-store`. Writing to the store root itself would make a stray that
+/// neither lane reads.
+fn default_output_dir(spec: &ManifestSpec) -> Option<PathBuf> {
+    spec.secrets_store.as_ref().map(|store| store.join(age::ENV_LANE))
+}
+
+/// Render `age decrypt <path>`. A directory sweep over a split store (a `.file/`
+/// beside a `.env/`) is refused before any identity is touched or any byte is
+/// built, so it is a command-level error with zero stdout. One explicit file
+/// path, even inside `.file/`, still decrypts.
+fn render_decrypt(path: &Path, format: &DecryptFormat, identity: Option<&str>) -> Result<String> {
+    debug!("render_decrypt: path={} format={:?}", path.display(), format);
+    age::refuse_split_store_sweep(path)?;
+    let identity_ref = age::resolve_identity(identity)?;
+    Ok(match format {
+        DecryptFormat::Export => age::render_exports(path, identity_ref.as_ref()),
+        DecryptFormat::Env => age::render_env(path, identity_ref.as_ref()),
+    })
 }
 
 fn handle_age_command(
@@ -298,12 +320,7 @@ fn handle_age_command(
 
     match action {
         Some(AgeAction::Decrypt { path, format }) => {
-            let identity_ref = age::resolve_identity(identity.as_deref())?;
-            let path = std::path::Path::new(&path);
-            let output = match format {
-                DecryptFormat::Export => age::render_exports(path, identity_ref.as_ref()),
-                DecryptFormat::Env => age::render_env(path, identity_ref.as_ref()),
-            };
+            let output = render_decrypt(Path::new(&path), &format, identity.as_deref())?;
             print!("{}", output);
             Ok(())
         }
@@ -499,9 +516,14 @@ fn handle_secrets_command(config: Option<String>, action: SecretsAction) -> Resu
     }
 }
 
-/// `manifest secrets deploy [--dry-run]`: decrypt each `secrets.file` entry and
-/// atomically write it to its destination path at `0600` (native Rust; the
-/// decrypted bytes never pass through generated Bash or stdout).
+/// `manifest secrets deploy [--dry-run]`: decrypt each `secrets.file` entry from
+/// `<root>/.file/<name>.age` and atomically write it to its destination path at
+/// `0600` (native Rust; the decrypted bytes never pass through generated Bash or
+/// stdout).
+///
+/// Command-level checks run first, even under `--dry-run`: a leftover
+/// `secrets.env:` key, a non-bare name, a symlinked lane root, or a name in both
+/// lanes is an error. Strays are warned, never fatal.
 ///
 /// `--dry-run` prints the planned `name -> path` for each entry and decrypts
 /// NOTHING, writes NOTHING - it returns before any identity is resolved or any
@@ -513,13 +535,29 @@ fn handle_secrets_command(config: Option<String>, action: SecretsAction) -> Resu
 /// command exits non-zero if ANY entry failed. Entries are deployed in sorted
 /// name order for deterministic, diffable output.
 fn secrets_deploy(config: Option<String>, dry_run: bool) -> Result<()> {
-    debug!("secrets_deploy: dry_run={}", dry_run);
+    run_secrets_deploy(config, dry_run, || age::resolve_identity(None))
+}
+
+/// `secrets_deploy` with the identity resolver injected, so tests can pass a
+/// throwaway identity. It is only called on the non-dry-run path.
+fn run_secrets_deploy(
+    config: Option<String>,
+    dry_run: bool,
+    resolve_identity: impl FnOnce() -> Result<Box<dyn ::age::Identity>>,
+) -> Result<()> {
+    debug!("run_secrets_deploy: dry_run={}", dry_run);
     let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
+    let root = resolve_secrets_root(&spec, &config_path)?;
+    reject_legacy_env(&spec, &root)?;
     // Fail-closed: reject any name that is not a bare identifier BEFORE dry-run
     // print or any decrypt/write, so a key like `../evil` can never join a path
-    // outside `.secrets/`. Same check the env lane and `encrypt_named` apply.
+    // outside `.file/`. Same check `encrypt_named` applies.
     age::validate_secret_names(spec.secrets.file.keys().map(String::as_str))?;
-    let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
+    age::check_lanes(&root)?;
+    for warning in age::find_strays(&root) {
+        emit_lane_warning(&warning);
+    }
+    let file_dir = root.join(age::FILE_LANE);
 
     // Deterministic order: a HashMap iterates in a different order every run.
     let mut entries: Vec<(String, String)> = spec
@@ -530,21 +568,21 @@ fn secrets_deploy(config: Option<String>, dry_run: bool) -> Result<()> {
         .collect();
     entries.sort();
     debug!(
-        "secrets_deploy: entries={} secrets_dir={}",
+        "secrets_deploy: entries={} file_dir={}",
         entries.len(),
-        secrets_dir.display()
+        file_dir.display()
     );
 
     if dry_run {
         for (name, dest) in &entries {
             println!("{} -> {}", name, dest);
         }
-        debug!("secrets_deploy: dry-run printed {} planned entries", entries.len());
+        debug!("run_secrets_deploy: dry-run printed {} planned entries", entries.len());
         return Ok(());
     }
 
-    let identity = age::resolve_identity(None)?;
-    let report = age::deploy_secret_files(&entries, &secrets_dir, identity.as_ref());
+    let identity = resolve_identity()?;
+    let report = age::deploy_secret_files(&entries, &file_dir, identity.as_ref());
 
     // Report each entry by name/path only - never a decrypted value.
     for name in &report.deployed {
@@ -563,69 +601,137 @@ fn secrets_deploy(config: Option<String>, dry_run: bool) -> Result<()> {
             entries.len()
         ));
     }
-    debug!("secrets_deploy: all {} entries deployed", report.deployed.len());
+    debug!("run_secrets_deploy: all {} entries deployed", report.deployed.len());
     Ok(())
 }
 
-/// Resolve the directory holding the `.age` ciphertext files for `secrets env`.
+/// Resolve the secrets root: the directory holding the `.env/` and `.file/`
+/// lanes.
 ///
 /// Order: an explicit `secrets-store` from the manifest (already tilde-expanded in
-/// `load_manifest_spec`), else `<dir-of-manifest.yml>/.secrets` - the default
-/// sibling store. Mirrors how `link:` resolves sources relative to the repo root:
-/// the loaded manifest's own path gives the store location, so no store path needs
-/// declaring for the common case.
-fn resolve_secrets_dir(spec: &ManifestSpec, config_path: &Path) -> Result<PathBuf> {
-    debug!("resolve_secrets_dir: config_path={}", config_path.display());
+/// `load_manifest_spec`), else `<dir-of-manifest.yml>`. Mirrors how `link:`
+/// resolves sources relative to the repo root: the loaded manifest's own path
+/// gives the root, so no store path needs declaring for the common case.
+fn resolve_secrets_root(spec: &ManifestSpec, config_path: &Path) -> Result<PathBuf> {
+    debug!("resolve_secrets_root: config_path={}", config_path.display());
     if let Some(store) = &spec.secrets_store {
-        debug!("resolve_secrets_dir: using secrets-store override {}", store.display());
+        debug!("resolve_secrets_root: using secrets-store override {}", store.display());
         return Ok(store.clone());
     }
     let dir = config_path
         .parent()
         .ok_or_else(|| eyre::eyre!("manifest path {} has no parent directory", config_path.display()))?
-        .join(".secrets");
-    debug!("resolve_secrets_dir: default sibling store {}", dir.display());
+        .to_path_buf();
+    debug!("resolve_secrets_root: default manifest dir {}", dir.display());
     Ok(dir)
+}
+
+/// A leftover `secrets.env:` key is a loud migration error in both lanes, never
+/// a silent ignore: the list is retired and the `.env/` directory replaced it.
+fn reject_legacy_env(spec: &ManifestSpec, root: &Path) -> Result<()> {
+    if spec.secrets.legacy_env {
+        return Err(eyre::eyre!(
+            "secrets.env is retired: env secrets are every .age in {}/; move the files and delete the list",
+            root.join(age::ENV_LANE).display()
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a lane warning also goes to stderr: an interactive terminal, or a
+/// systemd unit logging to the journal (`JOURNAL_STREAM` set). Daemons never
+/// see manifest's log file (`ProtectHome=read-only`), so the journal is their
+/// only channel; non-interactive shells (scp, rsync, git over ssh) stay silent.
+fn lane_warnings_to_stderr(stderr_is_tty: bool, journal_stream: bool) -> bool {
+    stderr_is_tty || journal_stream
+}
+
+/// Log a lane warning, and echo it to stderr when `lane_warnings_to_stderr` says so.
+fn emit_lane_warning(warning: &str) {
+    warn!("secrets lane: {}", warning);
+    if lane_warnings_to_stderr(
+        std::io::stderr().is_terminal(),
+        std::env::var_os("JOURNAL_STREAM").is_some(),
+    ) {
+        eprintln!("manifest: {}", warning);
+    }
 }
 
 /// Build the interactive stderr banner for a command-level `secrets env` failure.
 ///
-/// `declared` is the `secrets.env` allowlist size when the manifest parsed (so the
-/// operator sees how many secrets dropped); `None` when the config itself never
-/// parsed, in which case the count is genuinely unknown and is omitted rather than
-/// fabricated. Pure and unit-testable; the caller gates the actual emission on an
-/// interactive TTY.
-fn secrets_env_banner(declared: Option<usize>) -> String {
-    match declared {
+/// `enumerated` is the env lane's secret count when enumeration succeeded (so the
+/// operator sees how many secrets dropped); `None` when the config or the
+/// enumeration itself failed, in which case the count is genuinely unknown and
+/// is omitted rather than fabricated. Pure and unit-testable; the caller gates
+/// the actual emission on an interactive TTY.
+fn secrets_env_banner(enumerated: Option<usize>) -> String {
+    match enumerated {
         Some(n) => format!("manifest: secrets env failed, {} secrets not loaded", n),
         None => "manifest: secrets env failed, secrets not loaded".to_string(),
     }
 }
 
-/// Load the manifest and resolve the secrets store dir for `secrets env`.
+/// Load the manifest, resolve the secrets root, and enumerate the env lane.
 ///
 /// Command-level failures (an unparseable/`deny_unknown_fields`-violating manifest,
-/// a manifest path with no parent) surface here as `Err` BEFORE any identity is
-/// touched or any byte is emitted - which is exactly what makes the "zero stdout on
-/// command-level error" guarantee structural: the caller never reaches the emit
-/// step when this returns `Err`.
-fn secrets_env_context(config: Option<String>) -> Result<(ManifestSpec, PathBuf)> {
+/// a leftover `secrets.env:` key, a missing or symlinked lane, a name in both
+/// lanes) surface here as `Err` BEFORE any identity is touched or any byte is
+/// emitted - which is exactly what makes the "zero stdout on command-level
+/// error" guarantee structural: the caller never reaches the emit step when this
+/// returns `Err`. Returns the env lane dir and its enumeration.
+fn secrets_env_context(config: Option<String>) -> Result<(PathBuf, age::EnvLane)> {
     debug!("secrets_env_context: config={:?}", config);
     let (spec, config_path) = ManifestSpec::load_from_standard_locations(config)?;
-    // Fail-closed: reject any name that is not a bare identifier BEFORE resolving
-    // the store or touching an identity, so a name like `../evil` can never join
-    // a path outside `.secrets/`. Command-level error -> zero stdout in `secrets_env`.
-    age::validate_secret_names(spec.secrets.env.iter().map(String::as_str))?;
-    let secrets_dir = resolve_secrets_dir(&spec, &config_path)?;
+    let root = resolve_secrets_root(&spec, &config_path)?;
+    reject_legacy_env(&spec, &root)?;
+    let lane = age::enumerate_env_lane(&root)?;
+    let env_dir = root.join(age::ENV_LANE);
     debug!(
-        "secrets_env_context: env_count={} secrets_dir={}",
-        spec.secrets.env.len(),
-        secrets_dir.display()
+        "secrets_env_context: env_count={} env_dir={}",
+        lane.names.len(),
+        env_dir.display()
     );
-    Ok((spec, secrets_dir))
+    Ok((env_dir, lane))
 }
 
-/// `manifest secrets env [-f export|env]`: emit the `secrets.env` allowlist.
+/// The outcome of building `secrets env` output, as data: the enumerated count
+/// (for the failure banner), the lane warnings, and the buffer or the
+/// command-level error.
+struct SecretsEnvBuild {
+    enumerated: Option<usize>,
+    warnings: Vec<String>,
+    output: Result<String>,
+}
+
+/// Build the complete `secrets env` buffer without printing anything.
+/// `resolve_identity` is injected so tests can pass a throwaway identity.
+fn build_secrets_env(
+    config: Option<String>,
+    format: &DecryptFormat,
+    resolve_identity: impl FnOnce() -> Result<Box<dyn ::age::Identity>>,
+) -> SecretsEnvBuild {
+    debug!("build_secrets_env: format={:?}", format);
+    let (env_dir, lane) = match secrets_env_context(config) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            return SecretsEnvBuild {
+                enumerated: None,
+                warnings: vec![],
+                output: Err(e),
+            };
+        }
+    };
+    let enumerated = Some(lane.names.len());
+    let output =
+        resolve_identity().map(|identity| age::render_secrets_env(&lane.names, &env_dir, identity.as_ref(), format));
+    SecretsEnvBuild {
+        enumerated,
+        warnings: lane.warnings,
+        output,
+    }
+}
+
+/// `manifest secrets env [-f export|env]`: emit every `<root>/.env/*.age`.
 ///
 /// Fully buffered: `render_secrets_env` builds the whole output string, and it is
 /// printed in exactly ONE write on success, or NOTHING on a command-level error.
@@ -633,32 +739,23 @@ fn secrets_env_context(config: Option<String>) -> Result<(ManifestSpec, PathBuf)
 /// already on stdout mutates the shell even if the process later exits non-zero
 /// (proven in Phase 0), so the emit path must never stream.
 ///
-/// Two failure classes, kept distinct:
+/// Three outcome classes, kept distinct:
+/// - skipped entry (subdir, bad stem, escaping symlink) or stray -> a lane
+///   warning to the log, plus stderr on a TTY or under systemd; the rest emit.
 /// - per-secret decrypt failure -> skipped inside `render_secrets_env` with a
 ///   `warn!`; the rest still emit (handled in age.rs, not here).
-/// - command-level failure (bad config, no parent dir, unresolvable identity) ->
-///   zero stdout, non-zero exit (the returned `Err`), plus a one-line stderr
-///   banner gated on an interactive TTY so a lagging machine sees the drop instead
-///   of silently losing every secret.
+/// - command-level failure (bad config, retired `secrets.env:`, missing or
+///   symlinked lane, lane collision, unresolvable identity) -> zero stdout,
+///   non-zero exit (the returned `Err`), plus a one-line stderr banner gated on
+///   an interactive TTY so a lagging machine sees the drop instead of silently
+///   losing every secret.
 fn secrets_env(config: Option<String>, format: &DecryptFormat) -> Result<()> {
     debug!("secrets_env: format={:?}", format);
-
-    // Track the declared allowlist size so the failure banner can name it. It is
-    // only known once the manifest parses; a parse failure leaves it None.
-    let mut declared: Option<usize> = None;
-    let built = (|| -> Result<String> {
-        let (spec, secrets_dir) = secrets_env_context(config)?;
-        declared = Some(spec.secrets.env.len());
-        let identity = age::resolve_identity(None)?;
-        Ok(age::render_secrets_env(
-            &spec.secrets.env,
-            &secrets_dir,
-            identity.as_ref(),
-            format,
-        ))
-    })();
-
-    match built {
+    let build = build_secrets_env(config, format, || age::resolve_identity(None));
+    for warning in &build.warnings {
+        emit_lane_warning(warning);
+    }
+    match build.output {
         Ok(output) => {
             // Emit the complete buffer in one write. Nothing above reached stdout.
             print!("{}", output);
@@ -670,7 +767,7 @@ fn secrets_env(config: Option<String>, format: &DecryptFormat) -> Result<()> {
             // Err drives a non-zero exit, and an interactive-only banner reports it.
             warn!("secrets_env: command-level failure: {}", e);
             if std::io::stderr().is_terminal() {
-                eprintln!("{}", secrets_env_banner(declared));
+                eprintln!("{}", secrets_env_banner(build.enumerated));
             }
             Err(e)
         }
@@ -1110,7 +1207,12 @@ mod tests {
         );
     }
 
-    // ---- Phase 2: secrets env dispatch helpers ----
+    // ---- secrets lanes: shared fixtures ----
+    //
+    // Every fixture uses a THROWAWAY x25519 identity generated in the test, never
+    // the real ~/.config/manifest/identity.txt. `build_secrets_env` returns the
+    // buffer `secrets_env` would print: `secrets_env` prints ONLY in the Ok arm,
+    // so an `Err` output here IS the zero-stdout, non-zero-exit outcome.
 
     fn write_manifest(dir: &Path, content: &str) -> PathBuf {
         let path = dir.join("manifest.yml");
@@ -1118,25 +1220,67 @@ mod tests {
         path
     }
 
+    /// A secrets root with an empty manifest, a `.env/` and a `.file/` lane, and
+    /// a throwaway identity. Returns (root tempdir, manifest path, identity).
+    fn lane_root() -> (TempDir, String, ::age::x25519::Identity) {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".env")).unwrap();
+        fs::create_dir(tmp.path().join(".file")).unwrap();
+        let manifest = write_manifest(tmp.path(), "verbose: false\n");
+        (
+            tmp,
+            manifest.to_string_lossy().into_owned(),
+            ::age::x25519::Identity::generate(),
+        )
+    }
+
+    fn seal(path: &Path, value: &str, identity: &::age::x25519::Identity) {
+        let ciphertext = age::encrypt(value.as_bytes(), &identity.to_public()).unwrap();
+        fs::write(path, ciphertext).unwrap();
+    }
+
+    fn build_env(manifest: &str, identity: &::age::x25519::Identity) -> SecretsEnvBuild {
+        let id = identity.clone();
+        build_secrets_env(Some(manifest.to_string()), &DecryptFormat::Env, move || {
+            Ok(Box::new(id) as Box<dyn ::age::Identity>)
+        })
+    }
+
+    fn emitted_vars(output: &str) -> Vec<String> {
+        output
+            .lines()
+            .map(|l| l.split_once('=').unwrap().0.to_string())
+            .collect()
+    }
+
+    fn write_identity(dir: &Path, identity: &::age::x25519::Identity) -> String {
+        use ::age::secrecy::ExposeSecret;
+        let path = dir.join("identity.txt");
+        fs::write(&path, format!("{}\n", identity.to_string().expose_secret())).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    // ---- secrets root resolution ----
+
     #[test]
-    fn test_resolve_secrets_dir_defaults_to_sibling_dot_secrets() {
-        // No secrets-store override -> `<dir-of-manifest.yml>/.secrets`.
+    fn test_resolve_secrets_root_defaults_to_manifest_dir() {
+        // No secrets-store override -> `<dir-of-manifest.yml>`, no `.secrets` join.
         let spec = ManifestSpec::default();
         let config_path = Path::new("/some/repo/manifest.yml");
-        let dir = resolve_secrets_dir(&spec, config_path).unwrap();
-        assert_eq!(dir, PathBuf::from("/some/repo/.secrets"));
+        let dir = resolve_secrets_root(&spec, config_path).unwrap();
+        assert_eq!(dir, PathBuf::from("/some/repo"));
     }
 
     #[test]
-    fn test_resolve_secrets_dir_uses_secrets_store_override() {
-        // An explicit secrets-store wins over the default sibling dir.
+    fn test_resolve_secrets_root_uses_secrets_store_override() {
+        // An explicit secrets-store wins and names the root itself.
         let spec = ManifestSpec {
-            secrets_store: Some(PathBuf::from("/custom/store/.secrets")),
+            secrets_store: Some(PathBuf::from("/custom/store")),
             ..Default::default()
         };
         let config_path = Path::new("/some/repo/manifest.yml");
-        let dir = resolve_secrets_dir(&spec, config_path).unwrap();
-        assert_eq!(dir, PathBuf::from("/custom/store/.secrets"));
+        let dir = resolve_secrets_root(&spec, config_path).unwrap();
+        assert_eq!(dir, PathBuf::from("/custom/store"));
     }
 
     #[test]
@@ -1145,7 +1289,7 @@ mod tests {
             secrets_env_banner(Some(5)),
             "manifest: secrets env failed, 5 secrets not loaded"
         );
-        // Config never parsed -> count unknown -> omit the number rather than lie.
+        // Enumeration never ran -> count unknown -> omit the number rather than lie.
         assert_eq!(
             secrets_env_banner(None),
             "manifest: secrets env failed, secrets not loaded"
@@ -1153,10 +1297,20 @@ mod tests {
     }
 
     #[test]
+    fn test_lane_warnings_to_stderr_tty_or_journal_only() {
+        assert!(lane_warnings_to_stderr(true, false), "interactive TTY gets warnings");
+        assert!(lane_warnings_to_stderr(false, true), "systemd journal gets warnings");
+        assert!(
+            !lane_warnings_to_stderr(false, false),
+            "non-interactive shells (scp, rsync, git over ssh) get no stderr"
+        );
+    }
+
+    #[test]
     fn test_secrets_env_context_errors_on_unparseable_manifest() {
         // A `deny_unknown_fields` violation under `secrets:` is a command-level
         // failure that surfaces at config load - BEFORE any identity is resolved or
-        // any byte emitted. This proves the abort happens ahead of the emit step.
+        // any byte emitted.
         let tmp = TempDir::new().unwrap();
         let bad = write_manifest(tmp.path(), "secrets:\n  bogus: x\n");
         let result = secrets_env_context(Some(bad.to_string_lossy().into_owned()));
@@ -1166,24 +1320,302 @@ mod tests {
     #[test]
     fn test_secrets_env_command_level_failure_returns_err_no_stdout() {
         // secrets_env prints to stdout ONLY in its Ok arm. A command-level failure
-        // returns Err (driving a non-zero exit) having emitted nothing to stdout;
-        // asserting Err here is asserting the zero-stdout guarantee structurally.
+        // returns Err (driving a non-zero exit) having emitted nothing to stdout.
         let tmp = TempDir::new().unwrap();
         let bad = write_manifest(tmp.path(), "secrets:\n  bogus: x\n");
         let result = secrets_env(Some(bad.to_string_lossy().into_owned()), &DecryptFormat::Export);
         assert!(result.is_err(), "command-level failure must return Err (non-zero exit)");
     }
 
-    // ---- Phase 3: secrets deploy --dry-run ----
+    // ---- secrets env: the env lane ----
+
+    #[test]
+    fn test_secrets_env_emits_exactly_the_env_lane() {
+        // Exactly the `.env/*.age` set, sorted: a subdirectory and a non-`.age`
+        // file are not emitted, and neither is anything in `.file/`.
+        let (tmp, manifest, id) = lane_root();
+        let env = tmp.path().join(".env");
+        seal(&env.join("beta-token.age"), "b", &id);
+        seal(&env.join("alpha-key.age"), "a", &id);
+        fs::write(env.join("notes.txt"), "not a secret").unwrap();
+        fs::create_dir(env.join("nested.age")).unwrap();
+        fs::create_dir(env.join("sub")).unwrap();
+        seal(&env.join("sub").join("deep.age"), "d", &id);
+        seal(&tmp.path().join(".file").join("tls-key.age"), "PRIVATE", &id);
+
+        let build = build_env(&manifest, &id);
+        let output = build.output.unwrap();
+        assert_eq!(output, "ALPHA_KEY=a\nBETA_TOKEN=b\n");
+        assert_eq!(build.enumerated, Some(2), "banner count is the enumerated count");
+        assert!(
+            build.warnings.iter().any(|w| w.contains("nested.age")),
+            "a subdirectory is skipped with a warning: {:?}",
+            build.warnings
+        );
+        // A non-`.age` entry is ignored outright, not even reaching the stem check.
+        assert!(
+            !build.warnings.iter().any(|w| w.contains("notes.txt")),
+            "a non-.age file must be ignored silently: {:?}",
+            build.warnings
+        );
+    }
+
+    #[test]
+    fn test_secrets_env_empty_env_lane_is_valid() {
+        let (_tmp, manifest, id) = lane_root();
+        let build = build_env(&manifest, &id);
+        assert_eq!(build.output.unwrap(), "", "an empty .env/ is zero exports, exit 0");
+    }
+
+    #[test]
+    fn test_secrets_env_alias_inside_env_emits_under_own_name() {
+        // A relative symlink inside `.env/` to a sibling in `.env/` (the 3 keep
+        // aliases) is contained, so it emits under the ALIAS's own name.
+        let (tmp, manifest, id) = lane_root();
+        let env = tmp.path().join(".env");
+        seal(&env.join("github-pat-work.age"), "ghp_work", &id);
+        std::os::unix::fs::symlink("github-pat-work.age", env.join("gh-token.age")).unwrap();
+
+        let output = build_env(&manifest, &id).output.unwrap();
+        assert_eq!(output, "GH_TOKEN=ghp_work\nGITHUB_PAT_WORK=ghp_work\n");
+    }
+
+    #[test]
+    fn test_secrets_env_symlink_into_file_lane_not_emitted() {
+        // The fail-closed chokepoint: `.env/x.age -> ../.file/k.age` would leak a
+        // file secret into every env. It is skipped with a warning; the rest emit.
+        let (tmp, manifest, id) = lane_root();
+        let env = tmp.path().join(".env");
+        seal(&tmp.path().join(".file").join("k.age"), "PRIVATE-TLS-KEY", &id);
+        std::os::unix::fs::symlink("../.file/k.age", env.join("x.age")).unwrap();
+        std::os::unix::fs::symlink("missing.age", env.join("dangling.age")).unwrap();
+        seal(&env.join("ok.age"), "fine", &id);
+
+        let build = build_env(&manifest, &id);
+        let output = build.output.unwrap();
+        assert_eq!(output, "OK=fine\n");
+        assert!(!output.contains("PRIVATE-TLS-KEY"), "file secret leaked: {output}");
+        assert!(
+            build.warnings.iter().any(|w| w.contains("x.age")),
+            "escaping symlink must be warned: {:?}",
+            build.warnings
+        );
+        assert!(
+            build.warnings.iter().any(|w| w.contains("dangling.age")),
+            "dangling symlink must be warned: {:?}",
+            build.warnings
+        );
+    }
+
+    #[test]
+    fn test_secrets_env_collision_is_command_level_error() {
+        // The same name in both lanes: zero stdout (Err), non-zero exit.
+        let (tmp, manifest, id) = lane_root();
+        seal(&tmp.path().join(".env").join("dual.age"), "env-side", &id);
+        seal(&tmp.path().join(".env").join("other.age"), "fine", &id);
+        seal(&tmp.path().join(".file").join("dual.age"), "file-side", &id);
+
+        let build = build_env(&manifest, &id);
+        let err = build
+            .output
+            .expect_err("a name in both lanes must be a command-level error");
+        assert!(err.to_string().contains("dual"), "error names the collision: {err}");
+        assert_eq!(build.enumerated, None, "enumeration failed -> banner count stays None");
+    }
+
+    #[test]
+    fn test_secrets_env_legacy_list_is_migration_error() {
+        // A leftover `secrets.env:` key is a migration error with zero stdout,
+        // whatever its value: a list, an empty value, or null.
+        for body in [
+            "secrets:\n  env:\n    - github-pat-work\n",
+            "secrets:\n  env:\n",
+            "secrets:\n  env: null\n",
+        ] {
+            let (tmp, _manifest, id) = lane_root();
+            seal(&tmp.path().join(".env").join("github-pat-work.age"), "v", &id);
+            let manifest = write_manifest(tmp.path(), body);
+            let build = build_env(&manifest.to_string_lossy(), &id);
+            let err = build.output.expect_err("legacy secrets.env must fail");
+            assert!(
+                err.to_string().contains("secrets.env is retired"),
+                "migration message for {body:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secrets_env_symlinked_env_lane_root_is_error() {
+        // `.env/` itself a symlink to another dir: command-level error, even when
+        // the target holds a decryptable secret.
+        let tmp = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let id = ::age::x25519::Identity::generate();
+        seal(&elsewhere.path().join("k.age"), "PRIVATE", &id);
+        std::os::unix::fs::symlink(elsewhere.path(), tmp.path().join(".env")).unwrap();
+        let manifest = write_manifest(tmp.path(), "verbose: false\n");
+
+        let build = build_env(&manifest.to_string_lossy(), &id);
+        let err = build
+            .output
+            .expect_err("a symlinked .env/ must be a command-level error");
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+    }
+
+    #[test]
+    fn test_secrets_env_symlinked_file_lane_root_is_error() {
+        let tmp = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let id = ::age::x25519::Identity::generate();
+        fs::create_dir(tmp.path().join(".env")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), tmp.path().join(".file")).unwrap();
+        let manifest = write_manifest(tmp.path(), "verbose: false\n");
+
+        let build = build_env(&manifest.to_string_lossy(), &id);
+        assert!(
+            build.output.is_err(),
+            "a symlinked .file/ must be a command-level error"
+        );
+    }
+
+    #[test]
+    fn test_secrets_env_bad_stem_skipped_rest_emit() {
+        let (tmp, manifest, id) = lane_root();
+        let env = tmp.path().join(".env");
+        seal(&env.join("Bad_Name.age"), "nope", &id);
+        seal(&env.join("good-name.age"), "yes", &id);
+
+        let build = build_env(&manifest, &id);
+        assert_eq!(build.output.unwrap(), "GOOD_NAME=yes\n");
+        assert!(
+            build.warnings.iter().any(|w| w.contains("Bad_Name.age")),
+            "bad stem must be warned: {:?}",
+            build.warnings
+        );
+    }
+
+    #[test]
+    fn test_secrets_env_missing_env_lane_is_command_level_error() {
+        // A root with no `.env/` is a layout mistake, not "zero secrets".
+        let tmp = TempDir::new().unwrap();
+        let id = ::age::x25519::Identity::generate();
+        let manifest = write_manifest(tmp.path(), "verbose: false\n");
+
+        let build = build_env(&manifest.to_string_lossy(), &id);
+        assert_eq!(build.enumerated, None);
+        let err = build.output.expect_err("missing .env/ must be a command-level error");
+        assert!(err.to_string().contains("no env lane"), "got: {err}");
+    }
+
+    #[test]
+    fn test_secrets_env_strays_not_emitted_rest_emit() {
+        // A `.age` at the root and one under a leftover `.secrets/` are strays:
+        // never decrypted, warned, never fatal.
+        let (tmp, manifest, id) = lane_root();
+        seal(&tmp.path().join(".env").join("kept.age"), "k", &id);
+        seal(&tmp.path().join("root-stray.age"), "STRAY-ROOT", &id);
+        fs::create_dir_all(tmp.path().join(".secrets").join("deep")).unwrap();
+        seal(&tmp.path().join(".secrets").join("old-stray.age"), "STRAY-OLD", &id);
+        seal(
+            &tmp.path().join(".secrets").join("deep").join("deeper.age"),
+            "STRAY-DEEP",
+            &id,
+        );
+
+        let build = build_env(&manifest, &id);
+        let output = build.output.unwrap();
+        assert_eq!(emitted_vars(&output), vec!["KEPT".to_string()]);
+        for stray in ["root-stray.age", "old-stray.age", "deeper.age"] {
+            assert!(
+                build.warnings.iter().any(|w| w.contains(stray)),
+                "stray {stray} must be warned: {:?}",
+                build.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_secrets_env_identity_failure_keeps_enumerated_count() {
+        // Enumeration succeeded, identity did not: still a command-level error,
+        // and the banner can name how many secrets dropped.
+        let (tmp, manifest, id) = lane_root();
+        seal(&tmp.path().join(".env").join("one.age"), "1", &id);
+        let build = build_secrets_env(Some(manifest), &DecryptFormat::Env, || Err(eyre::eyre!("no identity")));
+        assert!(build.output.is_err());
+        assert_eq!(build.enumerated, Some(1));
+    }
+
+    // ---- age decrypt: split-store refusal ----
+
+    #[test]
+    fn test_age_decrypt_refuses_split_root_single_file_still_decrypts() {
+        let (tmp, _manifest, id) = lane_root();
+        let id_dir = TempDir::new().unwrap();
+        let id_path = write_identity(id_dir.path(), &id);
+        seal(&tmp.path().join(".env").join("env-one.age"), "e", &id);
+        let k = tmp.path().join(".file").join("k.age");
+        seal(&k, "PRIVATE-TLS-KEY", &id);
+
+        // A sweep of the split root is refused: Err, so nothing is printed.
+        let swept = render_decrypt(tmp.path(), &DecryptFormat::Export, Some(&id_path));
+        let err = swept.expect_err("a split-store sweep must be refused");
+        assert!(err.to_string().contains("secrets env"), "points at secrets env: {err}");
+
+        // A sweep of `.file/` itself is refused too (its sibling `.env/` exists).
+        assert!(render_decrypt(&tmp.path().join(".file"), &DecryptFormat::Env, Some(&id_path)).is_err());
+
+        // One explicit file inside `.file/` is the ad-hoc primitive: it decrypts.
+        let single = render_decrypt(&k, &DecryptFormat::Env, Some(&id_path)).unwrap();
+        assert_eq!(single, "K=PRIVATE-TLS-KEY\n");
+    }
+
+    #[test]
+    fn test_age_decrypt_sweep_of_unsplit_dir_still_works() {
+        // Contrast: a plain dir with no `.file/` beside `.env/` is swept as before.
+        let tmp = TempDir::new().unwrap();
+        let id = ::age::x25519::Identity::generate();
+        let id_dir = TempDir::new().unwrap();
+        let id_path = write_identity(id_dir.path(), &id);
+        seal(&tmp.path().join("plain.age"), "p", &id);
+        fs::create_dir(tmp.path().join(".file")).unwrap();
+
+        let out = render_decrypt(tmp.path(), &DecryptFormat::Env, Some(&id_path)).unwrap();
+        assert_eq!(out, "PLAIN=p\n");
+    }
+
+    // ---- age encrypt: default output dir ----
+
+    #[test]
+    fn test_encrypt_fallback_writes_into_secrets_store_env_lane() {
+        // With no `-o`, `--name` falls back to `<secrets-store>/.env`, so the
+        // written file lands in the env lane, never as a stray at the root.
+        let store = TempDir::new().unwrap();
+        fs::create_dir(store.path().join(".env")).unwrap();
+        let yaml = format!("secrets-store: {}\n", store.path().display());
+        let spec = config::load_manifest_spec(yaml.as_bytes()).unwrap();
+        let out_dir = default_output_dir(&spec).expect("secrets-store set -> fallback dir");
+        assert_eq!(out_dir, store.path().join(".env"));
+
+        let id = ::age::x25519::Identity::generate();
+        let written = age::encrypt_named("new-api-key", b"v", &id.to_public(), None, &out_dir, false).unwrap();
+        assert_eq!(written, store.path().join(".env").join("new-api-key.age"));
+        assert!(written.exists());
+        assert!(!store.path().join("new-api-key.age").exists(), "no stray at the root");
+    }
+
+    #[test]
+    fn test_encrypt_fallback_absent_without_secrets_store() {
+        assert_eq!(default_output_dir(&ManifestSpec::default()), None);
+    }
+
+    // ---- secrets deploy: the file lane ----
 
     #[test]
     fn test_secrets_deploy_dry_run_writes_and_decrypts_nothing() {
         // --dry-run must return Ok, create NO destination file, and decrypt
-        // nothing. We point a file entry at a dest under a non-existent parent AND
-        // provide NO backing .age (the store dir does not even exist), so if
-        // dry-run tried to decrypt or write it would error or create the parent.
-        // It does neither: it returns before resolving an identity or reading any
-        // ciphertext.
+        // nothing. The file entry points at a dest under a non-existent parent and
+        // there is NO backing .age (no lanes exist at all), so if dry-run tried to
+        // decrypt or write it would error or create the parent.
         let tmp = TempDir::new().unwrap();
         let dest_dir = TempDir::new().unwrap();
         let dest = dest_dir.path().join("subdir").join("signing");
@@ -1200,35 +1632,10 @@ mod tests {
         );
     }
 
-    // ---- audit fix: non-bare secret names are rejected up-front (command-level) ----
-
-    #[test]
-    fn test_secrets_env_context_rejects_non_bare_name() {
-        // A `secrets.env` entry that is not a bare identifier would `join` a
-        // ciphertext path outside `.secrets/`. It must be rejected at config time,
-        // BEFORE any identity/decrypt -> command-level error -> zero stdout in
-        // `secrets_env`. Remove the `validate_secret_names` call and this fails.
-        let tmp = TempDir::new().unwrap();
-        let path = write_manifest(tmp.path(), "secrets:\n  env:\n    - ../../other-store/key\n");
-        let result = secrets_env_context(Some(path.to_string_lossy().into_owned()));
-        assert!(result.is_err(), "a non-bare secrets.env name must be rejected");
-    }
-
-    #[test]
-    fn test_secrets_env_context_accepts_bare_names() {
-        // Contrast case: valid bare identifiers must NOT be rejected by validation
-        // (proves the reject test above bites on the name shape, not on load).
-        let tmp = TempDir::new().unwrap();
-        let path = write_manifest(tmp.path(), "secrets:\n  env:\n    - github-pat-home\n    - gh-token\n");
-        let result = secrets_env_context(Some(path.to_string_lossy().into_owned()));
-        assert!(result.is_ok(), "bare names must pass validation: {:?}", result.err());
-    }
-
     #[test]
     fn test_secrets_deploy_rejects_non_bare_key_even_in_dry_run() {
         // A `secrets.file` KEY that is not a bare identifier must be rejected before
-        // the dry-run print (and before any decrypt/write). dry_run=true needs no
-        // identity, so this isolates the name-validation wiring on the deploy lane.
+        // the dry-run print (and before any decrypt/write).
         let tmp = TempDir::new().unwrap();
         let path = write_manifest(tmp.path(), "secrets:\n  file:\n    ../evil: /tmp/pwned\n");
         let result = secrets_deploy(Some(path.to_string_lossy().into_owned()), true);
@@ -1236,6 +1643,98 @@ mod tests {
             result.is_err(),
             "a non-bare secrets.file key must be rejected even in dry-run"
         );
+    }
+
+    fn deploy_with(manifest: &Path, identity: &::age::x25519::Identity) -> Result<()> {
+        let id = identity.clone();
+        run_secrets_deploy(Some(manifest.to_string_lossy().into_owned()), false, move || {
+            Ok(Box::new(id) as Box<dyn ::age::Identity>)
+        })
+    }
+
+    #[test]
+    fn test_secrets_deploy_resolves_under_file_lane() {
+        // The ciphertext comes from `<root>/.file/<name>.age`. A same-named file
+        // at the root or in a leftover `.secrets/` is NOT used.
+        let (tmp, _manifest, id) = lane_root();
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("signing");
+        seal(
+            &tmp.path().join(".file").join("work-signing-key.age"),
+            "from-file-lane",
+            &id,
+        );
+        fs::create_dir(tmp.path().join(".secrets")).unwrap();
+        seal(
+            &tmp.path().join(".secrets").join("work-signing-key.age"),
+            "from-legacy-store",
+            &id,
+        );
+        let manifest = write_manifest(
+            tmp.path(),
+            &format!("secrets:\n  file:\n    work-signing-key: {}\n", dest.display()),
+        );
+
+        deploy_with(&manifest, &id).unwrap();
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "from-file-lane");
+    }
+
+    #[test]
+    fn test_secrets_deploy_ignores_env_lane() {
+        // A name only in `.env/` is not deployable: the entry fails, non-zero exit.
+        let (tmp, _manifest, id) = lane_root();
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("out");
+        seal(&tmp.path().join(".env").join("only-env.age"), "env-value", &id);
+        let manifest = write_manifest(
+            tmp.path(),
+            &format!("secrets:\n  file:\n    only-env: {}\n", dest.display()),
+        );
+
+        assert!(deploy_with(&manifest, &id).is_err());
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn test_secrets_deploy_legacy_list_is_migration_error() {
+        let (tmp, _manifest, id) = lane_root();
+        let manifest = write_manifest(tmp.path(), "secrets:\n  env: null\n");
+        let err = deploy_with(&manifest, &id).expect_err("legacy secrets.env must fail deploy");
+        assert!(err.to_string().contains("secrets.env is retired"), "got: {err}");
+        // Dry-run fails too: the check runs before the plan prints.
+        let dry = secrets_deploy(Some(manifest.to_string_lossy().into_owned()), true);
+        assert!(dry.is_err());
+    }
+
+    #[test]
+    fn test_secrets_deploy_collision_is_error() {
+        let (tmp, _manifest, id) = lane_root();
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("out");
+        seal(&tmp.path().join(".env").join("dual.age"), "e", &id);
+        seal(&tmp.path().join(".file").join("dual.age"), "f", &id);
+        let manifest = write_manifest(
+            tmp.path(),
+            &format!("secrets:\n  file:\n    dual: {}\n", dest.display()),
+        );
+
+        assert!(deploy_with(&manifest, &id).is_err());
+        assert!(!dest.exists(), "nothing deployed on a collision");
+    }
+
+    #[test]
+    fn test_secrets_deploy_symlinked_file_lane_root_is_error() {
+        let tmp = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("out");
+        let id = ::age::x25519::Identity::generate();
+        seal(&elsewhere.path().join("k.age"), "PRIVATE", &id);
+        std::os::unix::fs::symlink(elsewhere.path(), tmp.path().join(".file")).unwrap();
+        let manifest = write_manifest(tmp.path(), &format!("secrets:\n  file:\n    k: {}\n", dest.display()));
+
+        assert!(deploy_with(&manifest, &id).is_err());
+        assert!(!dest.exists());
     }
 
     /// Run the embedded linker.sh against (src, dst) in bash, the same way

@@ -4,7 +4,7 @@ use expand_tilde::expand_tilde;
 use eyre::{Result, eyre};
 use indexmap::IndexMap;
 use log::debug;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::from_reader;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -169,19 +169,28 @@ pub struct ScriptSpec {
     pub items: HashMap<String, String>,
 }
 
-/// Declares every age-encrypted secret and its sink: `env` (a plain list of
-/// names, each emitted as a shell/systemd env line) or `file` (a name -> path
-/// map, each decrypted to that path at `SECRET_FILE_MODE`). Both blocks are
-/// homogeneous value types (no scalar/map mix), so there is no `link:`/`dirs`
-/// style parse trap; `deny_unknown_fields` catches a typo'd key under
-/// `secrets:` at parse time instead of silently dropping it.
+/// Declares where each file-lane secret is deployed: `file` is a name -> path
+/// map, each `<root>/.file/<name>.age` decrypted to that path at
+/// `SECRET_FILE_MODE`. Env secrets need no declaration: every `.age` in
+/// `<root>/.env/` is emitted by `secrets env`, so the directory is the list.
+/// `deny_unknown_fields` catches a typo'd key under `secrets:` at parse time
+/// instead of silently dropping it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsSpec {
-    #[serde(default)]
-    pub env: Vec<String>,
+    /// Retired. True when a leftover `secrets.env:` key is present, so it can
+    /// be a migration error instead of serde's generic "unknown field `env`".
+    #[serde(default, rename = "env", deserialize_with = "key_present", skip_serializing)]
+    pub legacy_env: bool,
     #[serde(default)]
     pub file: HashMap<String, String>,
+}
+
+/// serde calls this only when the key exists, so presence is the signal;
+/// the value (list, empty, or null) is swallowed.
+fn key_present<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(d)?;
+    Ok(true)
 }
 
 fn default_repopath() -> String {
@@ -452,7 +461,7 @@ mod tests {
         assert!(spec.github.items.is_empty());
         assert!(spec.git_crypt.items.is_empty());
         assert!(spec.script.items.is_empty());
-        assert!(spec.secrets.env.is_empty());
+        assert!(!spec.secrets.legacy_env);
         assert!(spec.secrets.file.is_empty());
     }
 
@@ -462,17 +471,12 @@ mod tests {
     fn test_secrets_spec_round_trip() {
         let yaml = r#"
 secrets:
-  env:
-    - github-pat-work
-    - github-pat-home
   file:
     work-signing-key: ~/.ssh/identities/work/signing
     syncthing-cert-desk: ~/.config/syncthing/cert.pem
 "#;
         let spec: ManifestSpec = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(spec.secrets.env.len(), 2);
-        assert!(spec.secrets.env.contains(&"github-pat-work".to_string()));
-        assert!(spec.secrets.env.contains(&"github-pat-home".to_string()));
+        assert!(!spec.secrets.legacy_env, "no env: key -> not flagged legacy");
         assert_eq!(spec.secrets.file.len(), 2);
         assert_eq!(
             spec.secrets.file.get("work-signing-key"),
@@ -528,8 +532,8 @@ secrets:
     fn test_secrets_unknown_key_fails_deserialization() {
         let yaml = r#"
 secrets:
-  env:
-    - github-pat-work
+  file:
+    work-signing-key: ~/.ssh/identities/work/signing
   target: something
 "#;
         let result: std::result::Result<ManifestSpec, _> = serde_yaml::from_str(yaml);
@@ -540,8 +544,33 @@ secrets:
     fn test_secrets_absent_defaults_to_empty() {
         let yaml = "verbose: true\n";
         let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
-        assert!(spec.secrets.env.is_empty());
+        assert!(!spec.secrets.legacy_env);
         assert!(spec.secrets.file.is_empty());
+    }
+
+    #[test]
+    fn test_secrets_legacy_env_flagged_for_list_empty_and_null() {
+        // The retired `secrets.env:` key must be DETECTED (so the command can
+        // fail with a migration error) whatever its value: a list, an empty
+        // value, or an explicit null. An `Option<IgnoredAny>` would read the
+        // last two as None and miss them; presence is the signal.
+        for yaml in [
+            "secrets:\n  env:\n    - github-pat-work\n",
+            "secrets:\n  env:\n",
+            "secrets:\n  env: null\n",
+            "secrets:\n  env: []\n",
+        ] {
+            let spec = load_manifest_spec(yaml.as_bytes()).unwrap();
+            assert!(spec.secrets.legacy_env, "legacy env: key not flagged for {yaml:?}");
+        }
+    }
+
+    #[test]
+    fn test_secrets_legacy_env_never_serialized() {
+        // The retired flag is read-only: a serialized spec never re-emits `env:`.
+        let spec: ManifestSpec = serde_yaml::from_str("secrets:\n  env: []\n").unwrap();
+        let out = serde_yaml::to_string(&spec.secrets).unwrap();
+        assert!(!out.contains("env"), "legacy env must not serialize: {out}");
     }
 
     #[test]

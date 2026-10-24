@@ -36,6 +36,39 @@ link:
     HOME/.claude/skills: $HOME/.claude/skills
 ```
 
+## Secrets: directory-driven lanes
+
+The folder a secret lives in decides where it goes. `<root>` is `secrets-store`
+from `manifest.yml` if set, else the directory holding `manifest.yml`.
+
+```
+<root>/
+  .env/    <name>.age   -> $NAME, emitted by `manifest secrets env`
+  .file/   <name>.age   -> decrypted to secrets.file[<name>] by `manifest secrets deploy`
+```
+
+- `manifest secrets env [-f export|env]` emits every `<root>/.env/*.age`. Adding an
+  env secret is one step: encrypt it into `.env/`. No list is read.
+  - Non-recursive. Subdirectories and names outside `^[a-z][a-z0-9-]*$` are skipped with a warning.
+  - A symlink is followed only if its target stays inside `.env/`. One pointing into `.file/` is skipped.
+  - Command-level errors (zero stdout, non-zero exit): missing `.env/`, a lane root that is a
+    symlink, the same name in both lanes, or a leftover `secrets.env:` list.
+- `manifest secrets deploy [--dry-run]` resolves each `secrets.file` name to `<root>/.file/<name>.age`:
+
+  ```yaml
+  secrets:
+    file:
+      work-signing-key: ~/.ssh/identities/work/signing
+  ```
+
+- A `.age` directly in `<root>/` or under a leftover `<root>/.secrets/` is a stray: never
+  decrypted, warned about, never fatal.
+- Warnings go to the log, plus stderr when it is a TTY or `JOURNAL_STREAM` is set (systemd).
+- `manifest age decrypt <dir>` refuses a directory holding a `.file/` beside a `.env/`.
+  `manifest age decrypt <one-file>` still decrypts any single path.
+- `manifest age encrypt --name NAME` without `-o` writes to `<secrets-store>/.env/`. A file
+  secret passes `-o <root>/.file`.
+
 ## Release & Versioning Process
 
 1. **Bump the version in `Cargo.toml`** to the new release version (e.g., `0.2.0`).
