@@ -93,3 +93,21 @@ Commit `16bce34` on branch `secrets-folder-split`, worktree `/home/saidler/repos
 - The stray test asserts the resolved root (`.` for both spellings) plus a `find_strays` call on the tempdir joined with it, over changing process cwd. The `.` assertion is the part that bites. Live probe on the debug binary: 1 stray warning under each of `-C manifest.yml` and `-C ./manifest.yml`.
 ### Open questions
 - None.
+
+## Audit round 1 fold-in: callers and docs
+
+Commits (branch `secrets-folder-split`, local): second-brain `f165806`, slack-dashboard `c80248c`, homelab `4bf9b71`, keep `97e2b29` plus orchestrator fix on top. `otto ci` green in second-brain and slack-dashboard; homelab and keep have no `.otto.yml`.
+
+### Design decisions
+- `second-brain/bin/harvest-backfill`: path swap only (lines 10, 48, 52); its single-file `manifest age decrypt "$secret"` stays, since single-file decrypt is unchanged.
+- keep "How It Works" item 2 reworded to "The dotfiles repo loads these from `.zshenv`, which runs:".
+- keep KEY=VAL encrypt example uses `-o .env` (`--output-dir`, the tool's own destination flag).
+
+### Deviations
+- Orchestrator correction: the worker also gave the file-input example `manifest age encrypt my-secret-name -o .env`. Measured with a fake value: the file-input form prints ciphertext to stdout and writes nothing into the `-o` dir; only `--name` and `KEY=VAL` write `<name>.age` there. Restored the redirect form: `manifest age encrypt my-secret-name > .env/my-secret-name.age`.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- None. The worker reported `keep/.secrets` hits in second-brain and slack-dashboard `.otto.yml`; checked, both files have 0 matches for `secrets`. Widened criterion across all six worktrees: 0 non-fixture hits.
