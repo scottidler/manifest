@@ -3382,6 +3382,15 @@ mod tests {
         let not_dir = tmp.path().join("plain-file");
         std::fs::write(&not_dir, "x").unwrap();
         assert!(check_lane_root(&not_dir).is_err(), "non-directory lane -> Err");
+
+        // A stat failure other than NotFound (ENOTDIR: a parent is a regular
+        // file) is a loud error, never mistaken for an absent lane.
+        let under_file = not_dir.join(".env");
+        let err = check_lane_root(&under_file).expect_err("non-NotFound stat error -> Err");
+        assert!(
+            err.to_string().contains("failed to stat"),
+            "names the stat failure: {err}"
+        );
     }
 
     #[test]
@@ -3405,6 +3414,12 @@ mod tests {
         std::fs::write(tmp.path().join("top.age"), "x").unwrap();
         std::fs::create_dir(tmp.path().join(LEGACY_STORE)).unwrap();
         std::fs::write(tmp.path().join(LEGACY_STORE).join("old.age"), "x").unwrap();
+        // Neither a non-.age file nor a directory named `*.age` is a stray, at
+        // the root or under the legacy store.
+        std::fs::write(tmp.path().join("manifest.yml"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join("dir.age")).unwrap();
+        std::fs::write(tmp.path().join(LEGACY_STORE).join("notes.txt"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join(LEGACY_STORE).join("nested.age")).unwrap();
         let strays = find_strays(tmp.path());
         assert_eq!(strays.len(), 2, "{strays:?}");
         assert!(strays.iter().any(|w| w.contains("top.age")));

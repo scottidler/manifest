@@ -563,8 +563,12 @@ fn run_secrets_deploy(
     // outside `.file/`. Same check `encrypt_named` applies.
     age::validate_secret_names(spec.secrets.file.keys().map(String::as_str))?;
     age::check_lanes(&root)?;
+    let to_stderr = lane_warnings_to_stderr(
+        std::io::stderr().is_terminal(),
+        std::env::var_os("JOURNAL_STREAM").is_some(),
+    );
     for warning in age::find_strays(&root) {
-        emit_lane_warning(&warning);
+        emit_lane_warning(&warning, to_stderr, &mut std::io::stderr());
     }
     let file_dir = root.join(age::FILE_LANE);
 
@@ -660,14 +664,14 @@ fn lane_warnings_to_stderr(stderr_is_tty: bool, journal_stream: bool) -> bool {
     stderr_is_tty || journal_stream
 }
 
-/// Log a lane warning, and echo it to stderr when `lane_warnings_to_stderr` says so.
-fn emit_lane_warning(warning: &str) {
+/// Log a lane warning, and echo it to `sink` (stderr in production) when
+/// `to_stderr` is set. The sink is injected so the echo is testable.
+fn emit_lane_warning(warning: &str, to_stderr: bool, sink: &mut impl Write) {
     warn!("secrets lane: {}", warning);
-    if lane_warnings_to_stderr(
-        std::io::stderr().is_terminal(),
-        std::env::var_os("JOURNAL_STREAM").is_some(),
-    ) {
-        eprintln!("manifest: {}", warning);
+    if to_stderr {
+        // A failed warning echo (closed stderr) must not abort the command that
+        // is emitting secrets; the warning is already in the log above.
+        let _ = writeln!(sink, "manifest: {}", warning);
     }
 }
 
@@ -766,8 +770,12 @@ fn build_secrets_env(
 fn secrets_env(config: Option<String>, format: &DecryptFormat) -> Result<()> {
     debug!("secrets_env: format={:?}", format);
     let build = build_secrets_env(config, format, || age::resolve_identity(None));
+    let to_stderr = lane_warnings_to_stderr(
+        std::io::stderr().is_terminal(),
+        std::env::var_os("JOURNAL_STREAM").is_some(),
+    );
     for warning in &build.warnings {
-        emit_lane_warning(warning);
+        emit_lane_warning(warning, to_stderr, &mut std::io::stderr());
     }
     match build.output {
         Ok(output) => {
@@ -1328,6 +1336,24 @@ mod tests {
             secrets_env_banner(None),
             "manifest: secrets env failed, secrets not loaded"
         );
+    }
+
+    #[test]
+    fn test_emit_lane_warning_echoes_only_when_enabled() {
+        let mut sink = Vec::new();
+        emit_lane_warning("stray secret 'x.age'", true, &mut sink);
+        assert_eq!(String::from_utf8(sink).unwrap(), "manifest: stray secret 'x.age'\n");
+
+        let mut silent = Vec::new();
+        emit_lane_warning("stray secret 'x.age'", false, &mut silent);
+        assert!(silent.is_empty(), "no stderr echo when lane warnings are off");
+    }
+
+    #[test]
+    fn test_resolve_new_output_dir_explicit_dir_wins() {
+        // `-o DIR` is returned verbatim; config is never consulted.
+        let dir = PathBuf::from("/some/explicit/out");
+        assert_eq!(resolve_new_output_dir(Some(&dir)).unwrap(), dir);
     }
 
     #[test]

@@ -111,3 +111,20 @@ Commits (branch `secrets-folder-split`, local): second-brain `f165806`, slack-da
 
 ### Open questions
 - None. The worker reported `keep/.secrets` hits in second-brain and slack-dashboard `.otto.yml`; checked, both files have 0 matches for `secrets`. Widened criterion across all six worktrees: 0 non-fixture hits.
+
+## Fix-forward: surviving mutants
+
+GitHub CI's diff-scoped `mutants / report` job (cargo-mutants 27.1.0) left 5 survivors on v0.4.8 (run 40063476101). Each is now killed by a test. Each kill was checked by applying the mutation by hand, watching the named test fail, and restoring.
+
+### Design decisions
+- `resolve_new_output_dir` -> `Ok(Default::default())`: test_resolve_new_output_dir_explicit_dir_wins asserts `-o DIR` comes back verbatim (src/main.rs tests).
+- `emit_lane_warning` -> `()`: the function now takes `to_stderr: bool` and a `sink: &mut impl Write` (src/main.rs:emit_lane_warning). Both callers (run_secrets_deploy, secrets_env) compute `lane_warnings_to_stderr(stderr().is_terminal(), JOURNAL_STREAM set)` inline and pass `std::io::stderr()`, so CLI output is unchanged. test_emit_lane_warning_echoes_only_when_enabled asserts the exact `manifest: <warning>\n` line when enabled and an empty sink when disabled.
+- The stderr gate is computed inline at the two call sites, not in a new helper, on purpose: a zero-arg helper reading the process's TTY/env would itself become an untestable `-> true`/`-> false` survivor.
+- `check_lane_root` NotFound guard -> `true`: test_check_lane_root_states now stats `<regular-file>/.env`, which fails with ENOTDIR. The real code returns `Err("failed to stat ...")`; the mutant returned `Ok(false)` (lane treated as absent).
+- `find_strays` `&&` -> `||` (root scan and legacy-store walk): test_find_strays_root_and_legacy_store_only adds a non-`.age` file and a directory named `*.age` at the root and under `.secrets/`. The mutants count them as strays; the real code does not.
+### Deviations
+- `emit_lane_warning`'s stderr echo moved from `eprintln!` to `let _ = writeln!(sink, ...)`. A failed echo (closed stderr) no longer panics. The warning is already in the log, and a panic would abort a command in the middle of emitting secrets. Same output on a working stderr.
+### Tradeoffs
+- Injected the sink and the gate as parameters rather than excluding `emit_lane_warning` from mutation. An exclusion would hide the next regression too. The parameter costs two inline gate computations at the callers.
+### Open questions
+- None.
