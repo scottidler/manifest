@@ -98,6 +98,7 @@ keep/
 
 - `age decrypt <dir>` walks recursively (`find_age_files`, `src/age.rs:85`) with no lane check. Pointed at keep after the split, it would walk into `.file/` (walkdir does not skip hidden dirs) and print the syncthing files as exports. The panel ran this.
 - New rule: if the walk finds any directory named `.file` that has a sibling `.env`, `age decrypt <dir>` refuses. That is a command-level error with zero stdout, and the message points at `manifest secrets env`.
+- **The check is on canonical paths, not spelling** (implementation audit round 1, 2026-10-23). A *file lane* is a directory named `.file` whose parent also holds a `.env` directory. The sweep canonicalizes `<dir>` and every `.age` file it finds, following symlinks. It refuses if the canonical `<dir>` is, or is inside, a file lane, or if any found file's canonical path is inside one. This closes three spellings the first cut let through, all measured on the Phase 1 binary against a fake store: `cd .file && age decrypt .`, `age decrypt <symlink-to-.file>`, and `age decrypt <root>/.env` holding `x.age -> ../.file/k.age`.
 - `age decrypt <file>` on one explicit path is unchanged, including a path inside `.file/`. That is the ad-hoc single-secret primitive, and naming the file is the intent.
 
 #### `age encrypt --name` default output dir
@@ -178,6 +179,10 @@ manifest age encrypt --name NAME       # default output dir: <secrets-store>/.en
   - encrypt fallback writes `<secrets-store>/.env/<name>.age`
 - Docs: `README.md`, `CLAUDE.md` (also fixes the stale `secrets-store: ~/repos/scottidler/secrets/.secrets` example at `CLAUDE.md:47`, which now names the root). Add a dated superseded note in `2026-07-17-manifest-driven-secrets.md` at the Split stores alternative, pointing here.
 - **Success criteria:** `otto ci` green. Every test named above passes, and fails when its guarded branch is removed.
+- **Audit round 1 fold-in** (2026-10-23, follow-up commit on top of Phase 1):
+  - `age decrypt <dir>` refusal on canonical paths, per Architecture. New tests, each proven to bite: `cd .file && age decrypt .` refused; a dir symlink to `.file` refused; `.env/x.age -> ../.file/k.age` swept via `age decrypt <root>/.env` refused. Zero stdout in each.
+  - `resolve_secrets_root`: a bare `-C manifest.yml` has an empty parent; normalize it to `.` so `find_strays` reads the cwd. Test: a stray at the root warns under both `-C manifest.yml` and `-C ./manifest.yml`.
+  - `find_strays` no longer swallows a `read_dir` error on the root: it is a `warn!`, so a missed scan is visible.
 
 #### Phase 2: keep: move the files, drop the list
 **Model:** sonnet
@@ -207,6 +212,14 @@ manifest age encrypt --name NAME       # default output dir: <secrets-store>/.en
 - `dotfiles/HOME/.zshenv:22` comment -> `keep/.env/gh-token.age`.
 - `dotfiles/HOME/bin/entropy-check:198`: hidden-dir allow-set `.secrets` -> `.env`, `.file`.
 - **Success criteria:** `rg --hidden --no-ignore -g '!.git' -F 'keep/.secrets' claude/HOME dotfiles/HOME | wc -l` = 0. `rg -F '.secrets' dotfiles/HOME/bin/entropy-check | wc -l` = 0. `manifest-scope-guard-test.sh` and `intent-guard-test.sh` pass.
+- **Audit round 1 fold-in** (2026-10-23). The list above was scoped to claude and dotfiles, so its `rg` passed by construction. A sweep of every `scottidler/*` and `tatari-tv/*` repo found these, added here:
+  - `second-brain/bin/harvest-backfill:10,48,52` -> `keep/.env/escote-anthropic-api-key.age`. Runtime: its fallback decrypt dies after the move.
+  - `second-brain/config/templates/borg.yml.example:317` and `cortex.yml.example:212` (commented examples) -> `manifest -C ~/repos/scottidler/keep/manifest.yml secrets env -f env`.
+  - `slack-dashboard/docker-compose.yml:2`, `slack-dashboard/CLAUDE.md:74` -> `eval "$(manifest -C ~/repos/scottidler/keep/manifest.yml secrets env)"`.
+  - `homelab/gatus/.env.example:2` comment -> `keep/.env/escote-hindsight-api-basic.age`.
+  - `keep/CLAUDE.md`: the loader line names `.zshenv` (not `.shell-exports.d/secrets.env`); the encrypt example writes into `.env/`. `keep/manifest.yml` comment: `secrets file` -> `secrets deploy`. These ride the keep branch.
+  - Left alone on purpose: test fixtures and goldens (`second-brain/**/tests.rs`, `**/golden/*.service`, `manifest/src/config.rs` tilde-expansion tests) and history (`obsidian/notes/`, `docs/`).
+  - Widened criterion: `rg -l --hidden -g '!.git' -g '!target' -g '!**/docs/**' 'keep/[.]secrets' ~/repos/scottidler ~/repos/tatari-tv`, minus fixtures and history = 0, run against the branch worktrees.
 
 ## Acceptance Criteria
 
@@ -234,6 +247,7 @@ manifest age encrypt --name NAME       # default output dir: <secrets-store>/.en
 - **2026-10-23: Rollback is one line, not a coordinated plan.** A heavier plan conflicts with the no-transition-machinery non-goal. (Panel round 1 pushback, accepted.)
 - **2026-10-23: The no-store behavior change stays.** `secrets env` against a manifest with no store goes from exit 0 to an error. It is disclosed in Architecture, and no consumer does this. (Panel defer, accepted.)
 - **2026-10-23: Ship order is binary-first.** Both panel seats agreed. Reason: a new binary against old keep fails LOUDLY (migration error + TTY banner). An old binary against new keep fails SILENTLY (no `env:` list -> zero exports). See Rollout.
+- **2026-10-23: Implementation audit round 1 folded in.** Two must-fix and two cheap-win items, all accepted: the spelling-based sweep refusal becomes canonical, the caller inventory widens past claude and dotfiles, a bare `-C manifest.yml` keeps its stray warnings, and keep's docs finish the update. Deferred, with reasons in the synthesis: the untested `$NAME` duplicate branch (unreachable under the regex), and the sandbox-TMPDIR linker tests (fail the same way at baseline). The live checks come after rollout.
 
 ## Alternatives Considered
 
