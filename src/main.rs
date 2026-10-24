@@ -271,7 +271,16 @@ fn default_output_dir(spec: &ManifestSpec) -> Option<PathBuf> {
 /// built, so it is a command-level error with zero stdout. One explicit file
 /// path, even inside `.file/`, still decrypts.
 fn render_decrypt(path: &Path, format: &DecryptFormat, identity: Option<&str>) -> Result<String> {
-    debug!("render_decrypt: path={} format={:?}", path.display(), format);
+    let cwd = std::env::current_dir().wrap_err("failed to read the current directory")?;
+    render_decrypt_from(&cwd, path, format, identity)
+}
+
+/// `render_decrypt` with the working directory passed in: a relative `path`
+/// (`.`, `..`) is resolved against `cwd` before the split-store check, so the
+/// check and the sweep see the same directory.
+fn render_decrypt_from(cwd: &Path, path: &Path, format: &DecryptFormat, identity: Option<&str>) -> Result<String> {
+    let path = &cwd.join(path);
+    debug!("render_decrypt_from: path={} format={:?}", path.display(), format);
     age::refuse_split_store_sweep(path)?;
     let identity_ref = age::resolve_identity(identity)?;
     Ok(match format {
@@ -618,10 +627,15 @@ fn resolve_secrets_root(spec: &ManifestSpec, config_path: &Path) -> Result<PathB
         debug!("resolve_secrets_root: using secrets-store override {}", store.display());
         return Ok(store.clone());
     }
-    let dir = config_path
+    let parent = config_path
         .parent()
-        .ok_or_else(|| eyre::eyre!("manifest path {} has no parent directory", config_path.display()))?
-        .to_path_buf();
+        .ok_or_else(|| eyre::eyre!("manifest path {} has no parent directory", config_path.display()))?;
+    // A bare `-C manifest.yml` has the empty parent `""`, which `read_dir` cannot list.
+    let dir = if parent.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        parent.to_path_buf()
+    };
     debug!("resolve_secrets_root: default manifest dir {}", dir.display());
     Ok(dir)
 }
@@ -1272,6 +1286,26 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_secrets_root_bare_manifest_name_is_cwd() {
+        // `-C manifest.yml` has the empty parent "", which `find_strays` cannot
+        // list; both spellings must resolve to the cwd, so a root stray warns.
+        let spec = ManifestSpec::default();
+        let bare = resolve_secrets_root(&spec, Path::new("manifest.yml")).unwrap();
+        let dotted = resolve_secrets_root(&spec, Path::new("./manifest.yml")).unwrap();
+        assert_eq!(bare, PathBuf::from("."));
+        assert_eq!(dotted, PathBuf::from("."));
+
+        // Resolved against a cwd, the root is listable and the stray is warned.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("root-stray.age"), "x").unwrap();
+        for root in [bare, dotted] {
+            let warnings = age::find_strays(&tmp.path().join(&root));
+            assert_eq!(warnings.len(), 1, "root {}: {warnings:?}", root.display());
+            assert!(warnings[0].contains("root-stray.age"));
+        }
+    }
+
+    #[test]
     fn test_resolve_secrets_root_uses_secrets_store_override() {
         // An explicit secrets-store wins and names the root itself.
         let spec = ManifestSpec {
@@ -1567,6 +1601,81 @@ mod tests {
         // One explicit file inside `.file/` is the ad-hoc primitive: it decrypts.
         let single = render_decrypt(&k, &DecryptFormat::Env, Some(&id_path)).unwrap();
         assert_eq!(single, "K=PRIVATE-TLS-KEY\n");
+    }
+
+    /// A split root with a sealed file secret, plus an identity file for it.
+    fn split_store_with_file_secret() -> (TempDir, TempDir, String) {
+        let (tmp, _manifest, id) = lane_root();
+        let id_dir = TempDir::new().unwrap();
+        let id_path = write_identity(id_dir.path(), &id);
+        seal(&tmp.path().join(".env").join("env-one.age"), "e", &id);
+        seal(&tmp.path().join(".file").join("k.age"), "PRIVATE-TLS-KEY", &id);
+        (tmp, id_dir, id_path)
+    }
+
+    fn assert_refused(rendered: Result<String>) {
+        // Err means nothing reaches stdout: the caller prints only an Ok string.
+        let err = rendered.expect_err("the sweep must be refused, with zero stdout");
+        assert!(err.to_string().contains("secrets env"), "points at secrets env: {err}");
+    }
+
+    #[test]
+    fn test_age_decrypt_dot_with_cwd_in_file_lane_refused() {
+        // `cd .file && age decrypt .`: the spelling `.` names no `.file`, the
+        // canonical path does.
+        let (tmp, _id_dir, id_path) = split_store_with_file_secret();
+        let cwd = tmp.path().join(".file");
+        assert_refused(render_decrypt_from(
+            &cwd,
+            Path::new("."),
+            &DecryptFormat::Export,
+            Some(&id_path),
+        ));
+        // `cd .file/certs && age decrypt .`: inside the lane, no path component
+        // of the sweep root is named `.file` at all.
+        let certs = cwd.join("certs");
+        fs::create_dir(&certs).unwrap();
+        fs::write(certs.join("c.age"), "x").unwrap();
+        assert_refused(render_decrypt_from(
+            &certs,
+            Path::new("."),
+            &DecryptFormat::Env,
+            Some(&id_path),
+        ));
+        // The same cwd still decrypts one file named explicitly.
+        let single = render_decrypt_from(&cwd, Path::new("k.age"), &DecryptFormat::Env, Some(&id_path)).unwrap();
+        assert_eq!(single, "K=PRIVATE-TLS-KEY\n");
+    }
+
+    #[test]
+    fn test_age_decrypt_dir_symlink_to_file_lane_refused() {
+        let (tmp, _id_dir, id_path) = split_store_with_file_secret();
+        let elsewhere = TempDir::new().unwrap();
+        let link = elsewhere.path().join("innocent");
+        std::os::unix::fs::symlink(tmp.path().join(".file"), &link).unwrap();
+        assert_refused(render_decrypt(&link, &DecryptFormat::Env, Some(&id_path)));
+    }
+
+    #[test]
+    fn test_age_decrypt_env_lane_with_link_into_file_lane_refused() {
+        // `.env/x.age -> ../.file/k.age`: sweeping `.env/` alone would print the
+        // file secret as X=...; the found file canonicalizes into the file lane.
+        let (tmp, _id_dir, id_path) = split_store_with_file_secret();
+        let env = tmp.path().join(".env");
+        std::os::unix::fs::symlink("../.file/k.age", env.join("x.age")).unwrap();
+        assert_refused(render_decrypt(&env, &DecryptFormat::Env, Some(&id_path)));
+    }
+
+    #[test]
+    fn test_age_decrypt_env_lane_with_contained_alias_still_sweeps() {
+        // Contrast: an alias that stays inside `.env/` is not refused.
+        let (tmp, _id_dir, id_path) = split_store_with_file_secret();
+        let env = tmp.path().join(".env");
+        std::os::unix::fs::symlink("env-one.age", env.join("alias.age")).unwrap();
+        let out = render_decrypt(&env, &DecryptFormat::Env, Some(&id_path)).unwrap();
+        let mut lines: Vec<&str> = out.lines().collect();
+        lines.sort();
+        assert_eq!(lines, vec!["ALIAS=e", "ENV_ONE=e"]);
     }
 
     #[test]

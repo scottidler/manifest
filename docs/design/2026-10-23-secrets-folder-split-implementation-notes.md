@@ -78,3 +78,18 @@ Commit `16bce34` on branch `secrets-folder-split`, worktree `/home/saidler/repos
 - Left the `$SP/.secrets` scratch-dir mentions in intent-guard-test.sh:228 and intent-guard.sh:1862 alone: unrelated to keep.
 ### Open questions
 - None. Both commits are local on `secrets-folder-split` in the claude and dotfiles worktrees, not pushed.
+
+## Audit round 1 fold-in: manifest
+### Design decisions
+- Split-store refusal runs on canonical paths (src/age.rs:refuse_split_store_sweep, enclosing_file_lane). It canonicalizes `<dir>` and every `.age` from `find_age_files`, then refuses if either has an ancestor named `.file` whose parent holds `.env`. The walk for a split store nested below `<dir>` stays. A dangling `.age` link is skipped by the check (trace): it decrypts to nothing and render already reports it.
+- A relative `age decrypt` path is resolved against the cwd before the check and the sweep (src/main.rs:render_decrypt -> render_decrypt_from). The check and the sweep see the same directory, and tests pass a tempdir cwd instead of changing process cwd.
+- `resolve_secrets_root` maps an empty manifest parent (`-C manifest.yml`) to `.` (src/main.rs:resolve_secrets_root).
+- `find_strays` logs a `warn!` when `read_dir` on the root fails, instead of returning no strays (src/age.rs:find_strays).
+### Deviations
+- The refusal message says "it reaches the file lane '<lane>'" and names one lane path, not the `.file`/`.env` pair. The canonical cases (a symlink out of `.env/`, a cwd inside the lane) have no nested pair to name. It still points at `manifest secrets env`.
+- In the live binary, the cwd join alone closes `cd .file && age decrypt .` (`/abs/.file/.` names `.file` to the old walk). The canonical-dir check guards the variant with no `.file` component, `cd .file/certs && age decrypt .`, so the cwd test covers both spellings.
+### Tradeoffs
+- Kept the canonical-dir check even though the per-file check refuses every case that would print a secret. Without it, a sweep of an empty or link-only spelling of a file lane succeeds with empty output; with it, the answer is always a refusal. test_refuse_split_store_sweep_canonical_dir_inside_file_lane bites it.
+- The stray test asserts the resolved root (`.` for both spellings) plus a `find_strays` call on the tempdir joined with it, over changing process cwd. The `.` assertion is the part that bites. Live probe on the debug binary: 1 stray warning under each of `-C manifest.yml` and `-C ./manifest.yml`.
+### Open questions
+- None.

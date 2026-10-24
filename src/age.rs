@@ -1399,14 +1399,18 @@ pub fn check_lanes(root: &Path) -> Result<()> {
 /// warnings, never an error: one misplaced file must not drop every secret.
 pub fn find_strays(root: &Path) -> Vec<String> {
     let mut strays = Vec::new();
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if !is_dir && path.extension().is_some_and(|ext| ext == "age") {
-                strays.push(path);
+    match fs::read_dir(root) {
+        Ok(entries) => {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if !is_dir && path.extension().is_some_and(|ext| ext == "age") {
+                    strays.push(path);
+                }
             }
         }
+        // A missed scan must be visible, not a silent "no strays".
+        Err(e) => warn!("find_strays: cannot list root '{}' for strays: {}", root.display(), e),
     }
     let legacy = root.join(LEGACY_STORE);
     if legacy.is_dir() {
@@ -1527,27 +1531,59 @@ pub fn enumerate_env_lane(root: &Path) -> Result<EnvLane> {
     Ok(lane)
 }
 
-/// Refuse an `age decrypt <dir>` sweep over a split store: if the walk finds a
-/// directory named `.file` with a sibling `.env`, the sweep would print file
-/// secrets as env lines. A single explicit file path is never refused: naming
-/// the file is the intent.
+/// The nearest file lane at or above `canonical`: a directory named `.file`
+/// whose parent also holds a `.env`. `canonical` must already be canonical, so
+/// no spelling (`.`, a symlink, `..`) hides the lane.
+fn enclosing_file_lane(canonical: &Path) -> Option<&Path> {
+    canonical.ancestors().find(|dir| {
+        dir.file_name().is_some_and(|name| name == FILE_LANE)
+            && dir
+                .parent()
+                .is_some_and(|parent| fs::symlink_metadata(parent.join(ENV_LANE)).is_ok())
+    })
+}
+
+/// Refuse an `age decrypt <dir>` sweep that would print file secrets as env
+/// lines. The check runs on canonical paths, never on spelling: it refuses if
+/// the canonical `<dir>` is, or is inside, a file lane (a `.file` beside a
+/// `.env`); if any `.age` the sweep finds canonicalizes into one (a symlink out
+/// of `.env/`); or if the walk finds a split store nested below `<dir>`. A
+/// single explicit file path is never refused: naming the file is the intent.
 pub fn refuse_split_store_sweep(path: &Path) -> Result<()> {
     debug!("refuse_split_store_sweep: path={}", path.display());
     if !path.is_dir() {
         return Ok(());
     }
+    let refusal = |lane: &Path| {
+        eyre!(
+            "refusing to sweep '{}': it reaches the file lane '{}' of a split secrets store; \
+             use `manifest secrets env` for env secrets, or decrypt one file by path",
+            path.display(),
+            lane.display()
+        )
+    };
+    let canonical_dir =
+        fs::canonicalize(path).wrap_err_with(|| format!("failed to canonicalize '{}'", path.display()))?;
+    if let Some(lane) = enclosing_file_lane(&canonical_dir) {
+        return Err(refusal(lane));
+    }
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_dir() && entry.file_name() == FILE_LANE {
             let sibling_env = entry.path().with_file_name(ENV_LANE);
             if fs::symlink_metadata(&sibling_env).is_ok() {
-                return Err(eyre!(
-                    "refusing to sweep '{}': it holds a split secrets store ('{}' beside '{}'); \
-                     use `manifest secrets env` for env secrets, or decrypt one file by path",
-                    path.display(),
-                    entry.path().display(),
-                    sibling_env.display()
-                ));
+                return Err(refusal(entry.path()));
             }
+        }
+    }
+    for file in find_age_files(path) {
+        match fs::canonicalize(&file) {
+            Ok(canonical) => {
+                if let Some(lane) = enclosing_file_lane(&canonical) {
+                    return Err(refusal(lane));
+                }
+            }
+            // A dangling link decrypts to nothing; render reports it loudly.
+            Err(e) => trace!("refuse_split_store_sweep: {} does not resolve ({})", file.display(), e),
         }
     }
     Ok(())
@@ -3406,5 +3442,23 @@ mod tests {
             "a nested split store is found by the walk"
         );
         assert!(refuse_split_store_sweep(&k).is_ok(), "a single file is never refused");
+    }
+
+    #[test]
+    fn test_refuse_split_store_sweep_canonical_dir_inside_file_lane() {
+        // The canonical sweep root alone decides, even with no `.age` found to
+        // trip the per-file check: a symlinked spelling of `.file/certs` (empty)
+        // is still a refusal, never a silent empty sweep.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(FILE_LANE).join("certs")).unwrap();
+        std::fs::create_dir(tmp.path().join(ENV_LANE)).unwrap();
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        let link = elsewhere.path().join("certs");
+        std::os::unix::fs::symlink(tmp.path().join(FILE_LANE).join("certs"), &link).unwrap();
+        assert!(refuse_split_store_sweep(&link).is_err());
+
+        // Contrast: the same layout without `.env/` is not a split store.
+        std::fs::remove_dir(tmp.path().join(ENV_LANE)).unwrap();
+        assert!(refuse_split_store_sweep(&link).is_ok());
     }
 }
