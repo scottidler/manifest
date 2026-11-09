@@ -43,7 +43,7 @@ fn get_pkgmgr() -> String {
 #[derive(Debug, Parser)]
 #[command(
     name = "manifest",
-    version = env!("GIT_DESCRIBE"),
+    version = env!("BUILD_VERSION"),
     about = "Generate a Bash script from a YAML manifest describing your config.",
     after_help = "Logs are written to: ~/.local/share/manifest/logs/manifest.log"
 )]

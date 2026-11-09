@@ -15,6 +15,6 @@ permissions:
 jobs:
   cli-release:
     name: CLI Release
-    uses: tatari-tv/github-actions-public/.github/workflows/rust-cli-release.yml@v2.0.0  # yl:disable-line line-length
+    uses: tatari-tv/github-actions-public/.github/workflows/rust-cli-release.yml@v2.4.2  # yl:disable-line line-length
     with:
       rust-version: "1.99.1"
